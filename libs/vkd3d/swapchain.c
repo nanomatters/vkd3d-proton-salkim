@@ -22,6 +22,7 @@
 #include "vkd3d_win32.h"
 #endif
 #include "vkd3d_private.h"
+#include "swapchain_hud.h"
 #include "vkd3d_timestamp_profiler.h"
 
 static inline bool vkd3d_swapchain_present_mode_parse(const char *string, VkPresentModeKHR *present_mode)
@@ -112,6 +113,15 @@ struct anti_lag_state
     uint32_t max_fps;
 };
 
+struct dxgi_vk_swap_chain_hud_frame
+{
+    DXGI_VK_HUD_VERTEX *vertices;
+    size_t vertices_size;
+    uint32_t vertex_count;
+    float scale;
+    float opacity;
+};
+
 struct dxgi_vk_swap_chain_present_request
 {
     uint64_t begin_frame_time_ns;
@@ -128,6 +138,7 @@ struct dxgi_vk_swap_chain_present_request
     };
     bool low_latency_update_requested;
     bool modifies_hdr_metadata;
+    struct dxgi_vk_swap_chain_hud_frame hud;
 };
 
 struct present_wait_entry
@@ -157,7 +168,7 @@ struct platform_sleep_state
 
 struct dxgi_vk_swap_chain
 {
-    IDXGIVkSwapChain2 IDXGIVkSwapChain_iface;
+    IDXGIVkSwapChainHud IDXGIVkSwapChain_iface;
     struct d3d12_command_queue *queue;
 
     LONG refcount;
@@ -308,7 +319,18 @@ struct dxgi_vk_swap_chain
         DXGI_VK_HDR_METADATA dxgi_hdr_metadata;
         bool modifies_hdr_metadata;
         uint64_t begin_frame_time_ns;
+        struct dxgi_vk_swap_chain_hud_frame hud;
     } user;
+
+    struct
+    {
+        struct vkd3d_swapchain_hud renderer;
+        uint8_t *font_data;
+        uint32_t font_data_size;
+        uint32_t font_width;
+        uint32_t font_height;
+        bool enabled;
+    } hud;
 
     struct
     {
@@ -571,6 +593,12 @@ static void dxgi_vk_swap_chain_cleanup_common(struct dxgi_vk_swap_chain *chain)
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
     unsigned int i;
 
+    vkd3d_swapchain_hud_cleanup(&chain->hud.renderer, chain->queue->device);
+    vkd3d_free(chain->user.hud.vertices);
+    for (i = 0; i < ARRAY_SIZE(chain->request_ring); i++)
+        vkd3d_free(chain->request_ring[i].hud.vertices);
+    vkd3d_free(chain->hud.font_data);
+
     VK_CALL(vkDestroySemaphore(chain->queue->device->vk_device, chain->present.vk_internal_blit_semaphore, NULL));
     VK_CALL(vkDestroySemaphore(chain->queue->device->vk_device, chain->present.vk_complete_semaphore, NULL));
     VK_CALL(vkDestroyCommandPool(chain->queue->device->vk_device, chain->present.vk_blit_command_pool, NULL));
@@ -607,12 +635,12 @@ static void dxgi_vk_swap_chain_cleanup(struct dxgi_vk_swap_chain *chain)
     dxgi_vk_swap_chain_cleanup_surface(chain);
 }
 
-static inline struct dxgi_vk_swap_chain *impl_from_IDXGIVkSwapChain(IDXGIVkSwapChain2 *iface)
+static inline struct dxgi_vk_swap_chain *impl_from_IDXGIVkSwapChain(IDXGIVkSwapChainHud *iface)
 {
     return CONTAINING_RECORD(iface, struct dxgi_vk_swap_chain, IDXGIVkSwapChain_iface);
 }
 
-static ULONG STDMETHODCALLTYPE dxgi_vk_swap_chain_AddRef(IDXGIVkSwapChain2 *iface)
+static ULONG STDMETHODCALLTYPE dxgi_vk_swap_chain_AddRef(IDXGIVkSwapChainHud *iface)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     UINT refcount = InterlockedIncrement(&chain->refcount);
@@ -629,7 +657,7 @@ static ULONG STDMETHODCALLTYPE dxgi_vk_swap_chain_AddRef(IDXGIVkSwapChain2 *ifac
     return refcount;
 }
 
-static ULONG STDMETHODCALLTYPE dxgi_vk_swap_chain_Release(IDXGIVkSwapChain2 *iface)
+static ULONG STDMETHODCALLTYPE dxgi_vk_swap_chain_Release(IDXGIVkSwapChainHud *iface)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     struct d3d12_device *device = chain->queue->device;
@@ -652,14 +680,15 @@ static ULONG STDMETHODCALLTYPE dxgi_vk_swap_chain_Release(IDXGIVkSwapChain2 *ifa
     return refcount;
 }
 
-static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_QueryInterface(IDXGIVkSwapChain2 *iface, REFIID riid, void **object)
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_QueryInterface(IDXGIVkSwapChainHud *iface, REFIID riid, void **object)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     TRACE("iface %p\n", iface);
     if (IsEqualGUID(riid, &IID_IUnknown) ||
             IsEqualGUID(riid, &IID_IDXGIVkSwapChain) ||
             IsEqualGUID(riid, &IID_IDXGIVkSwapChain1) ||
-            IsEqualGUID(riid, &IID_IDXGIVkSwapChain2))
+            IsEqualGUID(riid, &IID_IDXGIVkSwapChain2) ||
+            IsEqualGUID(riid, &IID_IDXGIVkSwapChainHud))
     {
         dxgi_vk_swap_chain_AddRef(&chain->IDXGIVkSwapChain_iface);
         *object = iface;
@@ -669,7 +698,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_QueryInterface(IDXGIVkSwapCh
     return E_NOINTERFACE;
 }
 
-static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetDesc(IDXGIVkSwapChain2 *iface, DXGI_SWAP_CHAIN_DESC1 *pDesc)
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetDesc(IDXGIVkSwapChainHud *iface, DXGI_SWAP_CHAIN_DESC1 *pDesc)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     TRACE("iface %p, pDesc %p\n", iface, pDesc);
@@ -677,21 +706,21 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetDesc(IDXGIVkSwapChain2 *i
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetAdapter(IDXGIVkSwapChain2 *iface, REFIID riid, void **object)
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetAdapter(IDXGIVkSwapChainHud *iface, REFIID riid, void **object)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     TRACE("iface %p\n", iface);
     return IUnknown_QueryInterface(chain->queue->device->parent, riid, object);
 }
 
-static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetDevice(IDXGIVkSwapChain2 *iface, REFIID riid, void **object)
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetDevice(IDXGIVkSwapChainHud *iface, REFIID riid, void **object)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     TRACE("iface %p\n", iface);
     return ID3D12Device15_QueryInterface(&chain->queue->device->ID3D12Device_iface, riid, object);
 }
 
-static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetImage(IDXGIVkSwapChain2 *iface, UINT BufferId, REFIID riid, void **object)
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetImage(IDXGIVkSwapChainHud *iface, UINT BufferId, REFIID riid, void **object)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     TRACE("iface %p, BufferId %u.\n", iface, BufferId);
@@ -700,21 +729,21 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetImage(IDXGIVkSwapChain2 *
     return ID3D12Resource2_QueryInterface(&chain->user.backbuffers[BufferId]->ID3D12Resource_iface, riid, object);
 }
 
-static UINT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetImageIndex(IDXGIVkSwapChain2 *iface)
+static UINT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetImageIndex(IDXGIVkSwapChainHud *iface)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     TRACE("iface %p.\n", iface);
     return chain->user.index;
 }
 
-static UINT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetFrameLatency(IDXGIVkSwapChain2 *iface)
+static UINT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetFrameLatency(IDXGIVkSwapChainHud *iface)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     TRACE("iface %p.\n", iface);
     return chain->frame_latency;
 }
 
-static HANDLE STDMETHODCALLTYPE dxgi_vk_swap_chain_GetFrameLatencyEvent(IDXGIVkSwapChain2 *iface)
+static HANDLE STDMETHODCALLTYPE dxgi_vk_swap_chain_GetFrameLatencyEvent(IDXGIVkSwapChainHud *iface)
 {
     struct dxgi_vk_swap_chain *swapchain = impl_from_IDXGIVkSwapChain(iface);
     HANDLE duplicated_handle;
@@ -848,7 +877,7 @@ err:
     return hr;
 }
 
-static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_ChangeProperties(IDXGIVkSwapChain2 *iface, const DXGI_SWAP_CHAIN_DESC1 *pDesc,
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_ChangeProperties(IDXGIVkSwapChainHud *iface, const DXGI_SWAP_CHAIN_DESC1 *pDesc,
         const UINT *pNodeMasks, IUnknown *const *ppPresentQueues)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
@@ -906,19 +935,19 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_ChangeProperties(IDXGIVkSwap
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetPresentRegion(IDXGIVkSwapChain2 *iface, const RECT *pRegion)
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetPresentRegion(IDXGIVkSwapChainHud *iface, const RECT *pRegion)
 {
     FIXME("iface %p, pRegion %p stub!\n", iface, pRegion);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetGammaControl(IDXGIVkSwapChain2 *iface, UINT NumControlPoints, const DXGI_RGB *pControlPoints)
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetGammaControl(IDXGIVkSwapChainHud *iface, UINT NumControlPoints, const DXGI_RGB *pControlPoints)
 {
     FIXME("iface %p, NumControlPoints %u, pControlPoints %p stub!\n", iface, NumControlPoints, pControlPoints);
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetFrameLatency(IDXGIVkSwapChain2 *iface, UINT MaxLatency)
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetFrameLatency(IDXGIVkSwapChainHud *iface, UINT MaxLatency)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     TRACE("iface %p, MaxLatency %u.\n", iface, MaxLatency);
@@ -1115,10 +1144,11 @@ static void dxgi_vk_swap_chain_wait_internal_handle(struct dxgi_vk_swap_chain *c
     }
 }
 
-static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChain2 *iface, UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS *pPresentParameters)
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChainHud *iface, UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS *pPresentParameters)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     struct dxgi_vk_swap_chain_present_request *request;
+    struct dxgi_vk_swap_chain_hud_frame hud;
     struct vkd3d_queue_timeline_trace_cookie cookie;
     bool low_latency_enable;
 
@@ -1136,6 +1166,14 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChain2 *i
     /* The present iteration on present thread has a similar counter and it will pick up the request from the ring. */
     chain->user.present_count += 1;
     request = &chain->request_ring[chain->user.present_count % ARRAY_SIZE(chain->request_ring)];
+
+    if (chain->hud.enabled)
+    {
+        hud = request->hud;
+        request->hud = chain->user.hud;
+        chain->user.hud = hud;
+        chain->user.hud.vertex_count = 0;
+    }
 
     request->swap_interval = SyncInterval;
     request->dxgi_format = chain->user.backbuffers[chain->user.index]->desc.Format;
@@ -1257,7 +1295,7 @@ static bool dxgi_vk_swap_chain_supports_color_space(struct dxgi_vk_swap_chain *c
     return ret;
 }
 
-static UINT STDMETHODCALLTYPE dxgi_vk_swap_chain_CheckColorSpaceSupport(IDXGIVkSwapChain2 *iface, DXGI_COLOR_SPACE_TYPE ColorSpace)
+static UINT STDMETHODCALLTYPE dxgi_vk_swap_chain_CheckColorSpaceSupport(IDXGIVkSwapChainHud *iface, DXGI_COLOR_SPACE_TYPE ColorSpace)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     UINT support_flags = 0;
@@ -1267,7 +1305,7 @@ static UINT STDMETHODCALLTYPE dxgi_vk_swap_chain_CheckColorSpaceSupport(IDXGIVkS
     return support_flags;
 }
 
-static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetColorSpace(IDXGIVkSwapChain2 *iface, DXGI_COLOR_SPACE_TYPE ColorSpace)
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetColorSpace(IDXGIVkSwapChainHud *iface, DXGI_COLOR_SPACE_TYPE ColorSpace)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     TRACE("iface %p, ColorSpace %u.\n", iface, ColorSpace);
@@ -1280,7 +1318,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetColorSpace(IDXGIVkSwapCha
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetHDRMetaData(IDXGIVkSwapChain2 *iface, const DXGI_VK_HDR_METADATA *pMetaData)
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetHDRMetaData(IDXGIVkSwapChainHud *iface, const DXGI_VK_HDR_METADATA *pMetaData)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     TRACE("iface %p, pMetadata %p.\n", iface, pMetaData);
@@ -1289,7 +1327,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetHDRMetaData(IDXGIVkSwapCh
     return S_OK;
 }
 
-static void STDMETHODCALLTYPE dxgi_vk_swap_chain_GetLastPresentCount(IDXGIVkSwapChain2 *iface, UINT64 *present_count)
+static void STDMETHODCALLTYPE dxgi_vk_swap_chain_GetLastPresentCount(IDXGIVkSwapChainHud *iface, UINT64 *present_count)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
 
@@ -1299,7 +1337,7 @@ static void STDMETHODCALLTYPE dxgi_vk_swap_chain_GetLastPresentCount(IDXGIVkSwap
     *present_count = chain->user.present_count;
 }
 
-static void STDMETHODCALLTYPE dxgi_vk_swap_chain_GetFrameStatistics(IDXGIVkSwapChain2 *iface,
+static void STDMETHODCALLTYPE dxgi_vk_swap_chain_GetFrameStatistics(IDXGIVkSwapChainHud *iface,
         DXGI_VK_FRAME_STATISTICS *frame_statistics)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
@@ -1314,7 +1352,7 @@ static void STDMETHODCALLTYPE dxgi_vk_swap_chain_GetFrameStatistics(IDXGIVkSwapC
     spinlock_release(&chain->frame_statistics.lock);
 }
 
-static void STDMETHODCALLTYPE dxgi_vk_swap_chain_SetTargetFrameRate(IDXGIVkSwapChain2 *iface, double frame_rate)
+static void STDMETHODCALLTYPE dxgi_vk_swap_chain_SetTargetFrameRate(IDXGIVkSwapChainHud *iface, double frame_rate)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
 
@@ -1364,7 +1402,70 @@ static void STDMETHODCALLTYPE dxgi_vk_swap_chain_SetTargetFrameRate(IDXGIVkSwapC
     pthread_mutex_unlock(&chain->frame_rate_limit.lock);
 }
 
-static CONST_VTBL struct IDXGIVkSwapChain2Vtbl dxgi_vk_swap_chain_vtbl =
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetHudData(IDXGIVkSwapChainHud *iface,
+        const DXGI_VK_HUD_DATA *data)
+{
+    struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
+    uint64_t font_data_size;
+    uint8_t *font_data;
+
+    TRACE("iface %p, data %p.\n", iface, data);
+
+    if (!data)
+    {
+        chain->user.hud.vertex_count = 0;
+        return S_OK;
+    }
+
+    if (data->StructSize < sizeof(*data) ||
+            data->VertexCount > VKD3D_SWAPCHAIN_HUD_MAX_VERTICES ||
+            (data->VertexCount && (!data->pVertices || data->VertexCount % 3)) ||
+            !isfinite(data->Scale) || data->Scale <= 0.0f ||
+            !isfinite(data->Opacity) || data->Opacity < 0.0f || data->Opacity > 1.0f)
+        return E_INVALIDARG;
+
+    if (data->VertexCount)
+    {
+        font_data_size = (uint64_t)data->FontWidth * data->FontHeight;
+        if (!data->FontWidth || !data->FontHeight || !data->pFontData ||
+                font_data_size != data->FontDataSize || font_data_size > 16 * 1024 * 1024)
+            return E_INVALIDARG;
+
+        if (chain->hud.font_data)
+        {
+            if (chain->hud.font_data_size != data->FontDataSize ||
+                    chain->hud.font_width != data->FontWidth ||
+                    chain->hud.font_height != data->FontHeight)
+                return E_INVALIDARG;
+        }
+        else
+        {
+            if (!(font_data = vkd3d_malloc(data->FontDataSize)))
+                return E_OUTOFMEMORY;
+
+            memcpy(font_data, data->pFontData, data->FontDataSize);
+            chain->hud.font_data = font_data;
+            chain->hud.font_data_size = data->FontDataSize;
+            chain->hud.font_width = data->FontWidth;
+            chain->hud.font_height = data->FontHeight;
+        }
+    }
+
+    if (data->VertexCount && !vkd3d_array_reserve((void **)&chain->user.hud.vertices,
+            &chain->user.hud.vertices_size, data->VertexCount, sizeof(*data->pVertices)))
+        return E_OUTOFMEMORY;
+
+    if (data->VertexCount)
+        memcpy(chain->user.hud.vertices, data->pVertices,
+                data->VertexCount * sizeof(*data->pVertices));
+    chain->user.hud.vertex_count = data->VertexCount;
+    chain->user.hud.scale = data->Scale;
+    chain->user.hud.opacity = data->Opacity;
+    chain->hud.enabled = true;
+    return S_OK;
+}
+
+static CONST_VTBL struct IDXGIVkSwapChainHudVtbl dxgi_vk_swap_chain_vtbl =
 {
     /* IUnknown methods */
     dxgi_vk_swap_chain_QueryInterface,
@@ -1392,6 +1493,8 @@ static CONST_VTBL struct IDXGIVkSwapChain2Vtbl dxgi_vk_swap_chain_vtbl =
     dxgi_vk_swap_chain_GetFrameStatistics,
     /* IDXGIVkSwapChain2 methods */
     dxgi_vk_swap_chain_SetTargetFrameRate,
+    /* IDXGIVkSwapChainHud methods */
+    dxgi_vk_swap_chain_SetHudData,
 };
 
 static bool dxgi_vk_swap_chain_update_formats_locked(struct dxgi_vk_swap_chain *chain, bool force_requery)
@@ -2394,6 +2497,7 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
     VkViewport viewport;
     bool blank_present;
     bool blit_command;
+    bool hud_requested;
 
     /* If application intends to present before we have rendered to it,
      * it is valid, but we need to ignore the blit, just clear backbuffer. */
@@ -2442,6 +2546,8 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
     blit_command = !blank_present &&
             viewport.width == (float)chain->present.backbuffer_width &&
             viewport.height == (float)chain->present.backbuffer_height;
+    hud_requested = chain->hud.enabled && chain->request.hud.vertex_count && chain->hud.font_data &&
+            !chain->hud.renderer.failed;
 
     memset(&dep_info, 0, sizeof(dep_info));
     dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
@@ -2561,12 +2667,21 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
             VK_CALL(vkCmdDraw(vk_cmd, 3, 1, 0, 0));
         }
 
+        if (hud_requested)
+            vkd3d_swapchain_hud_record(&chain->hud.renderer, chain->queue->device,
+                    vk_cmd, swapchain_index, chain->present.backbuffer_format,
+                    chain->present.backbuffer_width, chain->present.backbuffer_height,
+                    chain->request.dxgi_color_space_type, chain->request.hud.vertices,
+                    chain->request.hud.vertex_count, chain->request.hud.scale,
+                    chain->request.hud.opacity, chain->hud.font_data,
+                    chain->hud.font_data_size, chain->hud.font_width, chain->hud.font_height);
+
         VK_CALL(vkCmdEndRendering(vk_cmd));
     }
 
     if (blit_command)
     {
-		image_barrier[0].srcStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
+        image_barrier[0].srcStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
         image_barrier[0].srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
 
         image_barrier[1].srcStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
@@ -2575,6 +2690,30 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
         image_barrier[1].dstAccessMask = VK_ACCESS_2_NONE;
         image_barrier[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         image_barrier[1].newLayout = user_backbuffer->common_layout;
+
+        if (hud_requested)
+        {
+            image_barrier[0].dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+            image_barrier[0].dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+            image_barrier[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            image_barrier[0].newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            VK_CALL(vkCmdPipelineBarrier2(vk_cmd, &dep_info));
+
+            attachment_info.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            VK_CALL(vkCmdBeginRendering(vk_cmd, &rendering_info));
+            vkd3d_swapchain_hud_record(&chain->hud.renderer, chain->queue->device,
+                    vk_cmd, swapchain_index, chain->present.backbuffer_format,
+                    chain->present.backbuffer_width, chain->present.backbuffer_height,
+                    chain->request.dxgi_color_space_type, chain->request.hud.vertices,
+                    chain->request.hud.vertex_count, chain->request.hud.scale,
+                    chain->request.hud.opacity, chain->hud.font_data,
+                    chain->hud.font_data_size, chain->hud.font_width, chain->hud.font_height);
+            VK_CALL(vkCmdEndRendering(vk_cmd));
+
+            image_barrier[0].srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+            image_barrier[0].srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+            dep_info.imageMemoryBarrierCount = 1;
+        }
     }
     else
     {
