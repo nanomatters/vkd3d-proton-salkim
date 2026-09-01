@@ -2853,6 +2853,7 @@ static bool dxgi_vk_swap_chain_submit_blit(struct dxgi_vk_swap_chain *chain, uin
         chain->present.acquire_semaphore_consumed_at_blit[chain->present.acquire_semaphore_index] =
                 chain->present.internal_blit_count;
         chain->present.acquire_semaphore_signalled[chain->present.acquire_semaphore_index] = false;
+
     }
 
     return vr == VK_SUCCESS;
@@ -4206,9 +4207,6 @@ void dxgi_vk_swap_chain_get_latency_info(struct dxgi_vk_swap_chain *chain, D3D12
     VkGetLatencyMarkerInfoNV marker_info;
     uint32_t i;
 
-    /* There is no natural count, return blank output for missing output. */
-    memset(latency_results->frame_reports, 0, sizeof(latency_results->frame_reports));
-
     pthread_mutex_lock(&chain->present.low_latency_swapchain_lock);
 
     if (chain->present.vk_swapchain)
@@ -4253,10 +4251,16 @@ void dxgi_vk_swap_chain_get_latency_info(struct dxgi_vk_swap_chain *chain, D3D12
                 report->osRenderQueueEndTime = frame_reports[i].osRenderQueueEndTimeUs;
                 report->gpuRenderStartTime = frame_reports[i].gpuRenderStartTimeUs;
                 report->gpuRenderEndTime = frame_reports[i].gpuRenderEndTimeUs;
-                report->gpuActiveRenderTimeUs = frame_reports[i].gpuRenderEndTimeUs - frame_reports[i].gpuRenderStartTimeUs;
+                /* VK_NV_low_latency2 exposes the elapsed render interval, but not
+                 * active GPU time with idle periods excluded. */
+                report->gpuActiveRenderTimeUs = 0;
 
-                if (last_effective_report)
-                    report->gpuFrameTimeUs = frame_reports[i].gpuRenderEndTimeUs - last_effective_report->gpuRenderEndTimeUs;
+                if (last_effective_report &&
+                        frame_reports[i].gpuRenderEndTimeUs >= last_effective_report->gpuRenderEndTimeUs)
+                {
+                    report->gpuFrameTimeUs = min(frame_reports[i].gpuRenderEndTimeUs -
+                            last_effective_report->gpuRenderEndTimeUs, (uint64_t)UINT32_MAX);
+                }
                 else
                     report->gpuFrameTimeUs = 0;
 
