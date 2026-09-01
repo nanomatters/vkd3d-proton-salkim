@@ -235,7 +235,8 @@ static VkResult vkd3d_meta_create_graphics_pipeline(struct vkd3d_meta_ops *meta_
         VkPipelineLayout layout, VkFormat color_format, VkFormat ds_format, VkImageAspectFlags vk_aspect_mask,
         VkShaderModule vs_module, VkShaderModule fs_module, VkSampleCountFlagBits samples,
         const VkPipelineDepthStencilStateCreateInfo *ds_state, uint32_t dynamic_state_count, const VkDynamicState *dynamic_states,
-        const VkSpecializationInfo *spec_info, bool descriptor_buffer_compatible, VkPipeline *vk_pipeline)
+        const VkSpecializationInfo *spec_info, const VkPipelineColorBlendAttachmentState *blend_state,
+        bool descriptor_buffer_compatible, VkPipeline *vk_pipeline)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &meta_ops->device->vk_procs;
     VkPipelineColorBlendAttachmentState blend_attachment;
@@ -335,6 +336,9 @@ static VkResult vkd3d_meta_create_graphics_pipeline(struct vkd3d_meta_ops *meta_
     blend_attachment.colorWriteMask =
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    if (blend_state)
+        blend_attachment = *blend_state;
 
     cb_state.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     cb_state.pNext = NULL;
@@ -875,7 +879,7 @@ static HRESULT vkd3d_meta_create_swapchain_pipeline(struct vkd3d_meta_ops *meta_
     if ((vr = vkd3d_meta_create_graphics_pipeline(meta_ops,
             meta_swapchain_ops->vk_pipeline_layouts[key->filter], key->format, VK_FORMAT_UNDEFINED, VK_IMAGE_ASPECT_COLOR_BIT,
             meta_swapchain_ops->vk_vs_module, meta_swapchain_ops->vk_fs_module, 1,
-            NULL, 0, NULL, NULL, false, &pipeline->vk_pipeline)) < 0)
+            NULL, 0, NULL, NULL, NULL, false, &pipeline->vk_pipeline)) < 0)
         return hresult_from_vk_result(vr);
 
     pipeline->key = *key;
@@ -993,7 +997,7 @@ static HRESULT vkd3d_meta_create_copy_image_pipeline(struct vkd3d_meta_ops *meta
             VK_NULL_HANDLE, vk_module, key->sample_count,
             has_depth_target ? &ds_state : NULL,
             dynamic_state_count, dynamic_states,
-            &spec_info, true, &pipeline->vk_pipeline)) < 0)
+            &spec_info, NULL, true, &pipeline->vk_pipeline)) < 0)
         return hresult_from_vk_result(vr);
 
     pipeline->key = *key;
@@ -1350,7 +1354,7 @@ static HRESULT vkd3d_meta_create_resolve_image_graphics_pipeline(struct vkd3d_me
             VK_NULL_HANDLE, vk_module, VK_SAMPLE_COUNT_1_BIT,
             has_depth_target ? &ds_state : NULL,
             dynamic_state_count, dynamic_states,
-            &spec_info, true, &pipeline->vk_pipeline)) < 0)
+            &spec_info, NULL, true, &pipeline->vk_pipeline)) < 0)
         return hresult_from_vk_result(vr);
 
     memset(&pipeline->key, 0, sizeof(pipeline->key));
@@ -1664,6 +1668,171 @@ HRESULT vkd3d_meta_get_swapchain_pipeline(struct vkd3d_meta_ops *meta_ops,
 
     pthread_mutex_unlock(&meta_swapchain_ops->mutex);
     return S_OK;
+}
+
+static void vkd3d_swapchain_hud_ops_cleanup_resources(struct vkd3d_swapchain_hud_ops *ops,
+        struct d3d12_device *device)
+{
+    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    size_t i;
+
+    for (i = 0; i < ops->pipeline_count; i++)
+        VK_CALL(vkDestroyPipeline(device->vk_device, ops->pipelines[i].vk_pipeline, NULL));
+
+    VK_CALL(vkDestroyShaderModule(device->vk_device, ops->vk_vs_module, NULL));
+    VK_CALL(vkDestroyShaderModule(device->vk_device, ops->vk_fs_module, NULL));
+    VK_CALL(vkDestroyPipelineLayout(device->vk_device, ops->vk_pipeline_layout, NULL));
+    VK_CALL(vkDestroyDescriptorSetLayout(device->vk_device, ops->vk_set_layout, NULL));
+    vkd3d_free(ops->pipelines);
+
+    ops->vk_vs_module = VK_NULL_HANDLE;
+    ops->vk_fs_module = VK_NULL_HANDLE;
+    ops->vk_pipeline_layout = VK_NULL_HANDLE;
+    ops->vk_set_layout = VK_NULL_HANDLE;
+    ops->pipelines = NULL;
+    ops->pipelines_size = 0;
+    ops->pipeline_count = 0;
+}
+
+static void vkd3d_swapchain_hud_ops_cleanup(struct vkd3d_swapchain_hud_ops *ops,
+        struct d3d12_device *device)
+{
+    vkd3d_swapchain_hud_ops_cleanup_resources(ops, device);
+    pthread_mutex_destroy(&ops->mutex);
+}
+
+static HRESULT vkd3d_swapchain_hud_ops_init(struct vkd3d_swapchain_hud_ops *ops)
+{
+    int rc;
+
+    memset(ops, 0, sizeof(*ops));
+
+    if ((rc = pthread_mutex_init(&ops->mutex, NULL)))
+    {
+        ERR("Failed to initialize mutex, error %d.\n", rc);
+        return hresult_from_errno(rc);
+    }
+
+    return S_OK;
+}
+
+static HRESULT vkd3d_swapchain_hud_ops_init_resources(struct vkd3d_swapchain_hud_ops *ops,
+        struct d3d12_device *device)
+{
+    VkDescriptorSetLayoutBinding bindings[2];
+    VkPushConstantRange push_range;
+    VkResult vr;
+
+    if (ops->init_attempted)
+        return ops->init_result;
+
+    ops->init_attempted = true;
+    memset(bindings, 0, sizeof(bindings));
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    if ((vr = vkd3d_meta_create_descriptor_set_layout(device, ARRAY_SIZE(bindings), bindings,
+            false, &ops->vk_set_layout)) < 0)
+        goto fail;
+
+    push_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    push_range.offset = 0;
+    push_range.size = sizeof(struct vkd3d_swapchain_hud_push_constants);
+
+    if ((vr = vkd3d_meta_create_pipeline_layout(device, 1, &ops->vk_set_layout,
+            &push_range, &ops->vk_pipeline_layout)) < 0)
+        goto fail;
+
+    if ((vr = vkd3d_meta_create_shader_module(device,
+            SPIRV_CODE(vs_swapchain_hud), &ops->vk_vs_module)) < 0)
+        goto fail;
+
+    if ((vr = vkd3d_meta_create_shader_module(device,
+            SPIRV_CODE(fs_swapchain_hud), &ops->vk_fs_module)) < 0)
+        goto fail;
+
+    ops->init_result = S_OK;
+    return S_OK;
+
+fail:
+    WARN("Failed to initialize swapchain HUD resources, vr %d.\n", vr);
+    vkd3d_swapchain_hud_ops_cleanup_resources(ops, device);
+    ops->init_result = hresult_from_vk_result(vr);
+    return ops->init_result;
+}
+
+HRESULT vkd3d_meta_get_swapchain_hud_pipeline(struct vkd3d_meta_ops *meta_ops,
+        VkFormat format, struct vkd3d_swapchain_hud_info *info)
+{
+    struct vkd3d_swapchain_hud_ops *ops = &meta_ops->swapchain_hud;
+    VkPipelineColorBlendAttachmentState blend_state;
+    struct vkd3d_swapchain_hud_pipeline *pipeline;
+    HRESULT hr;
+    VkResult vr;
+    size_t i;
+    int rc;
+
+    if ((rc = pthread_mutex_lock(&ops->mutex)))
+        return hresult_from_errno(rc);
+
+    if (FAILED(hr = vkd3d_swapchain_hud_ops_init_resources(ops, meta_ops->device)))
+        goto out;
+
+    info->vk_set_layout = ops->vk_set_layout;
+    info->vk_pipeline_layout = ops->vk_pipeline_layout;
+
+    for (i = 0; i < ops->pipeline_count; i++)
+    {
+        if (ops->pipelines[i].format == format)
+        {
+            info->vk_pipeline = ops->pipelines[i].vk_pipeline;
+            hr = S_OK;
+            goto out;
+        }
+    }
+
+    if (!vkd3d_array_reserve((void **)&ops->pipelines, &ops->pipelines_size,
+            ops->pipeline_count + 1, sizeof(*ops->pipelines)))
+    {
+        hr = E_OUTOFMEMORY;
+        goto out;
+    }
+
+    memset(&blend_state, 0, sizeof(blend_state));
+    blend_state.blendEnable = VK_TRUE;
+    blend_state.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend_state.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blend_state.colorBlendOp = VK_BLEND_OP_ADD;
+    blend_state.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend_state.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blend_state.alphaBlendOp = VK_BLEND_OP_ADD;
+    blend_state.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    pipeline = &ops->pipelines[ops->pipeline_count];
+    if ((vr = vkd3d_meta_create_graphics_pipeline(meta_ops, ops->vk_pipeline_layout,
+            format, VK_FORMAT_UNDEFINED, VK_IMAGE_ASPECT_COLOR_BIT,
+            ops->vk_vs_module, ops->vk_fs_module, VK_SAMPLE_COUNT_1_BIT,
+            NULL, 0, NULL, NULL, &blend_state, false, &pipeline->vk_pipeline)) < 0)
+    {
+        hr = hresult_from_vk_result(vr);
+        goto out;
+    }
+
+    pipeline->format = format;
+    ops->pipeline_count++;
+    info->vk_pipeline = pipeline->vk_pipeline;
+    hr = S_OK;
+
+out:
+    pthread_mutex_unlock(&ops->mutex);
+    return hr;
 }
 
 static void vkd3d_query_ops_cleanup(struct vkd3d_query_ops *meta_query_ops,
@@ -2265,7 +2434,7 @@ static HRESULT vkd3d_sampler_feedback_ops_init(struct vkd3d_sampler_feedback_res
             if ((vr = vkd3d_meta_create_graphics_pipeline(&device->meta_ops,
                     sampler_feedback_ops->vk_graphics_decode_layout,
                     VK_FORMAT_R8_UINT, VK_FORMAT_UNDEFINED, VK_IMAGE_ASPECT_COLOR_BIT, VK_NULL_HANDLE, vk_module,
-                    VK_SAMPLE_COUNT_1_BIT, NULL, 0, NULL, NULL, true,
+                    VK_SAMPLE_COUNT_1_BIT, NULL, 0, NULL, NULL, NULL, true,
                     &sampler_feedback_ops->vk_pipelines[pipelines[i].type])))
             {
                 VK_CALL(vkDestroyShaderModule(device->vk_device, vk_module, NULL));
@@ -2501,6 +2670,9 @@ HRESULT vkd3d_meta_ops_init(struct vkd3d_meta_ops *meta_ops, struct d3d12_device
     if (FAILED(hr = vkd3d_swapchain_ops_init(&meta_ops->swapchain, device)))
         goto fail_swapchain_ops;
 
+    if (FAILED(hr = vkd3d_swapchain_hud_ops_init(&meta_ops->swapchain_hud)))
+        goto fail_swapchain_hud_ops;
+
     if (FAILED(hr = vkd3d_query_ops_init(&meta_ops->query, device)))
         goto fail_query_ops;
 
@@ -2543,6 +2715,8 @@ fail_execute_indirect_ops:
 fail_predicate_ops:
     vkd3d_query_ops_cleanup(&meta_ops->query, device);
 fail_query_ops:
+    vkd3d_swapchain_hud_ops_cleanup(&meta_ops->swapchain_hud, device);
+fail_swapchain_hud_ops:
     vkd3d_swapchain_ops_cleanup(&meta_ops->swapchain, device);
 fail_swapchain_ops:
     vkd3d_resolve_image_ops_cleanup(&meta_ops->resolve_image_legacy, device);
@@ -2576,6 +2750,7 @@ HRESULT vkd3d_meta_ops_cleanup(struct vkd3d_meta_ops *meta_ops, struct d3d12_dev
     vkd3d_execute_indirect_ops_cleanup(&meta_ops->execute_indirect, device);
     vkd3d_predicate_ops_cleanup(&meta_ops->predicate, device);
     vkd3d_query_ops_cleanup(&meta_ops->query, device);
+    vkd3d_swapchain_hud_ops_cleanup(&meta_ops->swapchain_hud, device);
     vkd3d_swapchain_ops_cleanup(&meta_ops->swapchain, device);
     vkd3d_copy_image_ops_cleanup(&meta_ops->copy_image_heap, device);
     vkd3d_copy_image_ops_cleanup(&meta_ops->copy_image_legacy, device);
