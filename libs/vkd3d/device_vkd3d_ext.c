@@ -21,6 +21,13 @@
 #include "vkd3d_private.h"
 #include "nvShaderExtnEnums.h"
 
+STATIC_ASSERT(sizeof(D3D12_FRAME_REPORT) == 240);
+STATIC_ASSERT(offsetof(D3D12_FRAME_REPORT, cameraConstructedTime) == 120);
+STATIC_ASSERT(offsetof(D3D12_FRAME_REPORT, crossAdapterCopyTimeUs) == 128);
+STATIC_ASSERT(offsetof(D3D12_FRAME_REPORT, aiFrameTimeUs) == 132);
+STATIC_ASSERT(sizeof(D3D12_LATENCY_RESULTS) == 15400);
+STATIC_ASSERT(offsetof(D3D12_LATENCY_RESULTS, frame_reports) == 8);
+
 uint32_t vkd3d_nv_shader_extn_entry_hash(const void *key)
 {
     return *(const unsigned int *)key;
@@ -1403,6 +1410,11 @@ static HRESULT STDMETHODCALLTYPE d3d12_low_latency_device_GetLatencyInfo(d3d_low
 {
     struct dxgi_vk_swap_chain *low_latency_swapchain;
     struct d3d12_device *device;
+
+    if (!latency_results)
+        return E_INVALIDARG;
+
+    memset(latency_results->frame_reports, 0, sizeof(latency_results->frame_reports));
 
     device = d3d12_device_from_ID3DLowLatencyDevice(iface);
 
