@@ -37,6 +37,27 @@ typedef struct DXGI_VK_FRAME_STATISTICS
     UINT64 PresentQPCTime;
 } DXGI_VK_FRAME_STATISTICS;
 
+typedef struct DXGI_VK_HUD_VERTEX
+{
+    FLOAT Position[2];
+    FLOAT Texcoord[2];
+    UINT Color;
+    UINT Padding;
+} DXGI_VK_HUD_VERTEX;
+
+typedef struct DXGI_VK_HUD_DATA
+{
+    UINT StructSize;
+    UINT VertexCount;
+    const DXGI_VK_HUD_VERTEX *pVertices;
+    FLOAT Scale;
+    FLOAT Opacity;
+    UINT FontWidth;
+    UINT FontHeight;
+    UINT FontDataSize;
+    const BYTE *pFontData;
+} DXGI_VK_HUD_DATA;
+
 [
     object,
     local,
@@ -135,6 +156,17 @@ interface IDXGIVkSwapChain2 : IDXGIVkSwapChain1
 [
     object,
     local,
+    uuid(deb1f1b9-48c7-4310-b5a9-3b92f593023f)
+]
+interface IDXGIVkSwapChainHud : IDXGIVkSwapChain2
+{
+    HRESULT SetHudData(
+        const DXGI_VK_HUD_DATA*    pData);
+}
+
+[
+    object,
+    local,
     uuid(e7d6c3ca-23a0-4e08-9f2f-ea5231df6633)
 ]
 interface IDXGIVkSwapChainFactory : IUnknown {
@@ -143,4 +175,3 @@ interface IDXGIVkSwapChainFactory : IUnknown {
     const DXGI_SWAP_CHAIN_DESC1*    pDesc,
           IDXGIVkSwapChain**        ppSwapChain);
 }
-
