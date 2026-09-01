@@ -1,3 +1,4 @@
+# Salkim modifications by Erhan Bilgili on 2026-09-01.
 
 vkd3d_test_flags = []
 vkd3d_test_deps = [ lib_d3d12, vkd3d_common_dep ]
@@ -8,6 +9,23 @@ endif
 d3d12_test_utils_lib = static_library('d3d12-test-utils', 'd3d12_test_utils.c',
   dependencies        : vkd3d_test_deps,
   include_directories : vkd3d_private_includes)
+
+hud_test_source = custom_target('swapchain-hud-source',
+  input : [ 'test_swapchain_hud.py', '../libs/vkd3d/swapchain.c' ],
+  output : 'swapchain_hud.c',
+  command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
+
+hud_test = executable('swapchain-hud', hud_test_source,
+  native : true,
+  include_directories : vkd3d_external_includes,
+  c_args : meson.get_compiler('c', native : true).get_supported_arguments([
+    '-UNDEBUG', '-Wno-unused-function', '-Wno-unused-variable',
+    '-Wno-unused-parameter', '-Wno-unused-but-set-variable' ]),
+  install : false)
+
+foreach hud_case : [ 'empty', 'publication', 'barrier', 'direct', 'blank', 'failed', 'queued' ]
+  test('swapchain-hud-' + hud_case, hud_test, args : [ hud_case ], timeout : 10)
+endforeach
 
 d3d12_test_src = [
   'd3d12_dxvk_interop_device.c',
