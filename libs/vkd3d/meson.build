@@ -35,6 +35,8 @@ vkd3d_shaders =[
 
   'shaders/vs_swapchain_fullscreen.vert',
   'shaders/fs_swapchain_fullscreen.frag',
+  'shaders/vs_swapchain_hud.vert',
+  'shaders/fs_swapchain_hud.frag',
   'shaders/cs_execute_indirect_patch.comp',
   'shaders/cs_execute_indirect_patch_debug_ring.comp',
   'shaders/cs_execute_indirect_multi_dispatch.comp',
@@ -89,6 +91,7 @@ vkd3d_src = [
   'state_object_common.c',
   'acceleration_structure.c',
   'opacity_micromap.c',
+  'swapchain_hud.c',
   'swapchain.c',
   'queue_timeline.c',
   'address_binding_tracker.c',

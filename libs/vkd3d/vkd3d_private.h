@@ -4931,6 +4931,45 @@ struct vkd3d_swapchain_ops
     size_t pipeline_count;
 };
 
+struct vkd3d_swapchain_hud_push_constants
+{
+    uint32_t surface_size[2];
+    float opacity;
+    float scale;
+    uint32_t output_mode;
+    uint32_t font_width;
+    uint32_t font_height;
+};
+
+struct vkd3d_swapchain_hud_info
+{
+    VkDescriptorSetLayout vk_set_layout;
+    VkPipelineLayout vk_pipeline_layout;
+    VkPipeline vk_pipeline;
+};
+
+struct vkd3d_swapchain_hud_pipeline
+{
+    VkFormat format;
+    VkPipeline vk_pipeline;
+};
+
+struct vkd3d_swapchain_hud_ops
+{
+    VkDescriptorSetLayout vk_set_layout;
+    VkPipelineLayout vk_pipeline_layout;
+    VkShaderModule vk_vs_module;
+    VkShaderModule vk_fs_module;
+
+    pthread_mutex_t mutex;
+    bool init_attempted;
+    HRESULT init_result;
+
+    struct vkd3d_swapchain_hud_pipeline *pipelines;
+    size_t pipelines_size;
+    size_t pipeline_count;
+};
+
 #define VKD3D_QUERY_OP_WORKGROUP_SIZE (64)
 
 struct vkd3d_query_resolve_args
@@ -5219,6 +5258,7 @@ struct vkd3d_meta_ops
     struct vkd3d_resolve_image_ops resolve_image_heap;
     struct vkd3d_resolve_image_ops resolve_image_legacy;
     struct vkd3d_swapchain_ops swapchain;
+    struct vkd3d_swapchain_hud_ops swapchain_hud;
     struct vkd3d_query_ops query;
     struct vkd3d_predicate_ops predicate;
     struct vkd3d_execute_indirect_ops execute_indirect;
@@ -5258,6 +5298,8 @@ HRESULT vkd3d_meta_get_resolve_image_pipeline(struct vkd3d_meta_ops *meta_ops,
         const struct vkd3d_resolve_image_pipeline_key *key, struct vkd3d_resolve_image_info *info, bool heap);
 HRESULT vkd3d_meta_get_swapchain_pipeline(struct vkd3d_meta_ops *meta_ops,
         const struct vkd3d_swapchain_pipeline_key *key, struct vkd3d_swapchain_info *info);
+HRESULT vkd3d_meta_get_swapchain_hud_pipeline(struct vkd3d_meta_ops *meta_ops,
+        VkFormat format, struct vkd3d_swapchain_hud_info *info);
 
 bool vkd3d_meta_get_query_gather_pipeline(struct vkd3d_meta_ops *meta_ops,
         D3D12_QUERY_HEAP_TYPE heap_type, struct vkd3d_query_gather_info *info);
