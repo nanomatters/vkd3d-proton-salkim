@@ -89,7 +89,10 @@ typedef struct D3D12_FRAME_REPORT
     UINT64 gpuRenderEndTime;
     UINT32 gpuActiveRenderTimeUs;
     UINT32 gpuFrameTimeUs;
-    UINT8 rsvd[120];
+    UINT64 cameraConstructedTime;
+    UINT32 crossAdapterCopyTimeUs;
+    UINT32 aiFrameTimeUs;
+    UINT8 rsvd[104];
 } D3D12_FRAME_REPORT;
 
 typedef struct D3D12_LATENCY_RESULTS
