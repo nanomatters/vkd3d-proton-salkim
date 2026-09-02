@@ -58,6 +58,31 @@ typedef struct DXGI_VK_HUD_DATA
     const BYTE *pFontData;
 } DXGI_VK_HUD_DATA;
 
+typedef enum DXGI_VK_PRESENT_TELEMETRY_VALID
+{
+    DXGI_VK_PRESENT_TELEMETRY_QUEUE = 1u << 0,
+    DXGI_VK_PRESENT_TELEMETRY_DISPLAY = 1u << 1,
+    DXGI_VK_PRESENT_TELEMETRY_PRESENT = 1u << 2,
+    DXGI_VK_PRESENT_TELEMETRY_INTERVAL = 1u << 3,
+} DXGI_VK_PRESENT_TELEMETRY_VALID;
+
+/* Durations are nanoseconds. Each valid field contains its latest available
+ * value. PresentId is the newest processed report, and CompletionStage
+ * identifies the best available presentation stage used as PresentComplete.
+ * DisplayIntervalNs is valid only for first pixel visible timestamps. */
+typedef struct DXGI_VK_PRESENT_TELEMETRY
+{
+    UINT StructSize;
+    UINT ValidFields;
+    UINT64 PresentId;
+    UINT64 QueueDurationNs;
+    UINT64 DisplayDurationNs;
+    UINT64 PresentDurationNs;
+    UINT64 DisplayIntervalNs;
+    UINT CompletionStage;
+    UINT Reserved;
+} DXGI_VK_PRESENT_TELEMETRY;
+
 [
     object,
     local,
@@ -162,6 +187,21 @@ interface IDXGIVkSwapChainHud : IDXGIVkSwapChain2
 {
     HRESULT SetHudData(
         const DXGI_VK_HUD_DATA*    pData);
+}
+
+/* This private interface is versioned by its GUID. */
+[
+    object,
+    local,
+    uuid(0363406f-8d3b-43d9-984f-5c9cf8a2cc0b)
+]
+interface IDXGIVkSwapChainPresentTelemetry : IUnknown
+{
+    HRESULT SetEnabled(
+        BOOL Enable);
+
+    HRESULT GetData(
+        DXGI_VK_PRESENT_TELEMETRY *pData);
 }
 
 [
