@@ -25,6 +25,10 @@
 #include "swapchain_hud.h"
 #include "vkd3d_timestamp_profiler.h"
 
+#define DXGI_PRESENT_TIMING_QUEUE_SIZE 16
+
+STATIC_ASSERT(sizeof(DXGI_VK_PRESENT_TELEMETRY) == 56);
+
 static inline bool vkd3d_swapchain_present_mode_parse(const char *string, VkPresentModeKHR *present_mode)
 {
     struct present_mode_entry
@@ -144,6 +148,7 @@ struct dxgi_vk_swap_chain_present_request
 struct present_wait_entry
 {
     uint64_t id;
+    uint64_t timing_id;
     uint64_t present_count;
     uint64_t begin_frame_time_ns;
     bool present_timing_enabled;
@@ -169,6 +174,7 @@ struct platform_sleep_state
 struct dxgi_vk_swap_chain
 {
     IDXGIVkSwapChainHud IDXGIVkSwapChain_iface;
+    IDXGIVkSwapChainPresentTelemetry IDXGIVkSwapChainPresentTelemetry_iface;
     struct d3d12_command_queue *queue;
 
     LONG refcount;
@@ -196,6 +202,7 @@ struct dxgi_vk_swap_chain
 
         /* When requesting feedback, use a specific one if implementation supports multiple. */
         VkPresentStageFlagsEXT present_stage;
+        VkPresentStageFlagsEXT telemetry_present_stage;
 
         /* If an implementation wants us to keep track of more than 16 time domains
          * at one time, just ignore the extra ones, as that is getting rather ridiculous. */
@@ -240,7 +247,9 @@ struct dxgi_vk_swap_chain
 
         /* PresentID is used depending on features and if we're really presenting on-screen. */
         uint64_t present_id;
+        uint64_t timing_id;
         bool present_id_valid;
+        bool timing_id_valid;
         bool present_target_enabled;
 
         /* Atomically updated after a PRESENT queue command has processed. Used to atomically check if
@@ -342,6 +351,23 @@ struct dxgi_vk_swap_chain
 
     struct
     {
+        uint32_t enabled;
+        spinlock_t lock;
+        DXGI_VK_PRESENT_TELEMETRY data;
+        uint64_t field_present_count[4];
+
+        struct
+        {
+            uint64_t present_count;
+            uint64_t queue_present_time_ns;
+        } pending[DXGI_PRESENT_TIMING_QUEUE_SIZE];
+
+        uint64_t previous_present_count;
+        uint64_t previous_present_complete_ns;
+    } present_telemetry;
+
+    struct
+    {
         pthread_mutex_t lock;
 
         bool enable;
@@ -376,7 +402,8 @@ struct dxgi_vk_swap_chain
         {
             uint64_t present_id;
             uint64_t present_count;
-        } id_correlation[16];
+            bool frame_statistics;
+        } id_correlation[DXGI_PRESENT_TIMING_QUEUE_SIZE];
         unsigned int id_correlation_count;
 
         /* Detect when we need to signal for repoll. Only
@@ -532,7 +559,8 @@ static void dxgi_vk_swap_chain_drain_queue(struct dxgi_vk_swap_chain *chain)
 }
 
 static void dxgi_vk_swap_chain_push_present_id(struct dxgi_vk_swap_chain *chain,
-        uint64_t present_count, uint64_t present_id, uint64_t begin_frame_time_ns, bool present_timing_enabled)
+        uint64_t present_count, uint64_t present_id, uint64_t timing_id,
+        uint64_t begin_frame_time_ns, bool present_timing_enabled)
 {
     struct present_wait_entry *entry;
     pthread_mutex_lock(&chain->wait_thread.lock);
@@ -540,6 +568,7 @@ static void dxgi_vk_swap_chain_push_present_id(struct dxgi_vk_swap_chain *chain,
             chain->wait_thread.wait_queue_count + 1, sizeof(*chain->wait_thread.wait_queue));
     entry = &chain->wait_thread.wait_queue[chain->wait_thread.wait_queue_count++];
     entry->id = present_id;
+    entry->timing_id = timing_id;
     entry->present_count = present_count;
     entry->begin_frame_time_ns = begin_frame_time_ns;
     entry->present_timing_enabled = present_timing_enabled;
@@ -565,7 +594,7 @@ static void dxgi_vk_swap_chain_cleanup_low_latency(struct dxgi_vk_swap_chain *ch
 
 static void dxgi_vk_swap_chain_cleanup_waiter_thread(struct dxgi_vk_swap_chain *chain)
 {
-    dxgi_vk_swap_chain_push_present_id(chain, 0, 0, 0, true);
+    dxgi_vk_swap_chain_push_present_id(chain, 0, 0, 0, 0, true);
     pthread_join(chain->wait_thread.thread, NULL);
     pthread_mutex_destroy(&chain->wait_thread.lock);
     pthread_cond_destroy(&chain->wait_thread.cond);
@@ -640,6 +669,12 @@ static inline struct dxgi_vk_swap_chain *impl_from_IDXGIVkSwapChain(IDXGIVkSwapC
     return CONTAINING_RECORD(iface, struct dxgi_vk_swap_chain, IDXGIVkSwapChain_iface);
 }
 
+static inline struct dxgi_vk_swap_chain *impl_from_IDXGIVkSwapChainPresentTelemetry(
+        IDXGIVkSwapChainPresentTelemetry *iface)
+{
+    return CONTAINING_RECORD(iface, struct dxgi_vk_swap_chain, IDXGIVkSwapChainPresentTelemetry_iface);
+}
+
 static ULONG STDMETHODCALLTYPE dxgi_vk_swap_chain_AddRef(IDXGIVkSwapChainHud *iface)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
@@ -684,6 +719,13 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_QueryInterface(IDXGIVkSwapCh
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     TRACE("iface %p\n", iface);
+    if (IsEqualGUID(riid, &IID_IDXGIVkSwapChainPresentTelemetry))
+    {
+        dxgi_vk_swap_chain_AddRef(&chain->IDXGIVkSwapChain_iface);
+        *object = &chain->IDXGIVkSwapChainPresentTelemetry_iface;
+        return S_OK;
+    }
+
     if (IsEqualGUID(riid, &IID_IUnknown) ||
             IsEqualGUID(riid, &IID_IDXGIVkSwapChain) ||
             IsEqualGUID(riid, &IID_IDXGIVkSwapChain1) ||
@@ -695,7 +737,68 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_QueryInterface(IDXGIVkSwapCh
         return S_OK;
     }
 
+    *object = NULL;
     return E_NOINTERFACE;
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_present_telemetry_QueryInterface(
+        IDXGIVkSwapChainPresentTelemetry *iface, REFIID riid, void **object)
+{
+    struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChainPresentTelemetry(iface);
+    return dxgi_vk_swap_chain_QueryInterface(&chain->IDXGIVkSwapChain_iface, riid, object);
+}
+
+static ULONG STDMETHODCALLTYPE dxgi_vk_swap_chain_present_telemetry_AddRef(
+        IDXGIVkSwapChainPresentTelemetry *iface)
+{
+    struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChainPresentTelemetry(iface);
+    return dxgi_vk_swap_chain_AddRef(&chain->IDXGIVkSwapChain_iface);
+}
+
+static ULONG STDMETHODCALLTYPE dxgi_vk_swap_chain_present_telemetry_Release(
+        IDXGIVkSwapChainPresentTelemetry *iface)
+{
+    struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChainPresentTelemetry(iface);
+    return dxgi_vk_swap_chain_Release(&chain->IDXGIVkSwapChain_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_present_telemetry_SetEnabled(
+        IDXGIVkSwapChainPresentTelemetry *iface, BOOL enable)
+{
+    struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChainPresentTelemetry(iface);
+
+    vkd3d_atomic_uint32_store_explicit(&chain->present_telemetry.enabled,
+            enable != FALSE, vkd3d_memory_order_release);
+
+    if (!enable)
+    {
+        spinlock_acquire(&chain->present_telemetry.lock);
+        memset(&chain->present_telemetry.data, 0, sizeof(chain->present_telemetry.data));
+        memset(chain->present_telemetry.field_present_count, 0,
+                sizeof(chain->present_telemetry.field_present_count));
+        memset(chain->present_telemetry.pending, 0, sizeof(chain->present_telemetry.pending));
+        chain->present_telemetry.previous_present_count = 0;
+        chain->present_telemetry.previous_present_complete_ns = 0;
+        spinlock_release(&chain->present_telemetry.lock);
+    }
+
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_present_telemetry_GetData(
+        IDXGIVkSwapChainPresentTelemetry *iface, DXGI_VK_PRESENT_TELEMETRY *data)
+{
+    struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChainPresentTelemetry(iface);
+
+    if (!data || data->StructSize < sizeof(*data))
+        return E_INVALIDARG;
+
+    spinlock_acquire(&chain->present_telemetry.lock);
+    *data = chain->present_telemetry.data;
+    spinlock_release(&chain->present_telemetry.lock);
+
+    data->StructSize = sizeof(*data);
+    return data->ValidFields ? S_OK : S_FALSE;
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetDesc(IDXGIVkSwapChainHud *iface, DXGI_SWAP_CHAIN_DESC1 *pDesc)
@@ -1497,6 +1600,15 @@ static CONST_VTBL struct IDXGIVkSwapChainHudVtbl dxgi_vk_swap_chain_vtbl =
     dxgi_vk_swap_chain_SetHudData,
 };
 
+static CONST_VTBL struct IDXGIVkSwapChainPresentTelemetryVtbl dxgi_vk_swap_chain_present_telemetry_vtbl =
+{
+    dxgi_vk_swap_chain_present_telemetry_QueryInterface,
+    dxgi_vk_swap_chain_present_telemetry_AddRef,
+    dxgi_vk_swap_chain_present_telemetry_Release,
+    dxgi_vk_swap_chain_present_telemetry_SetEnabled,
+    dxgi_vk_swap_chain_present_telemetry_GetData,
+};
+
 static bool dxgi_vk_swap_chain_update_formats_locked(struct dxgi_vk_swap_chain *chain, bool force_requery)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
@@ -1620,6 +1732,13 @@ static void dxgi_vk_swap_chain_update_wait_timing_capabilities(struct dxgi_vk_sw
         chain->timing.present_stage = secondary_stage;
     else if (present_timing_caps.presentStageQueries & VK_PRESENT_STAGE_REQUEST_DEQUEUED_BIT_EXT)
         chain->timing.present_stage = VK_PRESENT_STAGE_REQUEST_DEQUEUED_BIT_EXT;
+
+    if (present_timing_caps.presentStageQueries & VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_VISIBLE_BIT_EXT)
+        chain->timing.telemetry_present_stage = VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_VISIBLE_BIT_EXT;
+    else if (present_timing_caps.presentStageQueries & VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT)
+        chain->timing.telemetry_present_stage = VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT;
+    else if (present_timing_caps.presentStageQueries & VK_PRESENT_STAGE_REQUEST_DEQUEUED_BIT_EXT)
+        chain->timing.telemetry_present_stage = VK_PRESENT_STAGE_REQUEST_DEQUEUED_BIT_EXT;
 }
 
 static HRESULT dxgi_vk_swap_chain_create_surface(struct dxgi_vk_swap_chain *chain, IDXGIVkSurfaceFactory *pFactory)
@@ -1809,9 +1928,20 @@ static void dxgi_vk_swap_chain_destroy_swapchain_in_present_task(struct dxgi_vk_
     chain->present.backbuffer_count = 0;
     chain->present.force_swapchain_recreation = false;
     chain->present.present_id_valid = false;
+    chain->present.timing_id_valid = false;
     chain->present.present_target_enabled = false;
     chain->present.present_id = 0;
+    chain->present.timing_id = 0;
     chain->present.current_backbuffer_index = UINT32_MAX;
+
+    spinlock_acquire(&chain->present_telemetry.lock);
+    memset(&chain->present_telemetry.data, 0, sizeof(chain->present_telemetry.data));
+    memset(chain->present_telemetry.field_present_count, 0,
+            sizeof(chain->present_telemetry.field_present_count));
+    memset(chain->present_telemetry.pending, 0, sizeof(chain->present_telemetry.pending));
+    chain->present_telemetry.previous_present_count = 0;
+    chain->present_telemetry.previous_present_complete_ns = 0;
+    spinlock_release(&chain->present_telemetry.lock);
 
     if (chain->queue->device->vk_info.NV_low_latency2)
         pthread_mutex_unlock(&chain->present.low_latency_swapchain_lock);
@@ -2101,7 +2231,7 @@ static void dxgi_vk_swap_chain_poll_time_domains(struct dxgi_vk_swap_chain *chai
 }
 
 static bool dxgi_vk_swap_chain_poll_single_calibration(struct dxgi_vk_swap_chain *chain,
-        VkTimeDomainEXT time_domain, uint64_t time_domain_id,
+        VkTimeDomainEXT time_domain, uint64_t time_domain_id, VkPresentStageFlagsEXT present_stage,
         uint64_t *calibration)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
@@ -2130,7 +2260,7 @@ static bool dxgi_vk_swap_chain_poll_single_calibration(struct dxgi_vk_swap_chain
         swapchain_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT;
         swapchain_info.swapchain = chain->present.vk_swapchain;
         swapchain_info.timeDomainId = time_domain_id;
-        swapchain_info.presentStage = chain->timing.present_stage;
+        swapchain_info.presentStage = present_stage;
         infos[1].pNext = &swapchain_info;
     }
 
@@ -2161,7 +2291,7 @@ static void dxgi_vk_swap_chain_poll_calibration(struct dxgi_vk_swap_chain *chain
     for (i = 0; i < chain->timing.time_domains_count; i++)
     {
         if (!dxgi_vk_swap_chain_poll_single_calibration(chain, chain->timing.time_domains[i],
-                chain->timing.time_domain_ids[i], chain->timing.calibration[i]))
+                chain->timing.time_domain_ids[i], chain->timing.present_stage, chain->timing.calibration[i]))
         {
             FIXME("Failed to calibrate.\n");
         }
@@ -2369,10 +2499,9 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
         if (chain->timing.time_domains_count)
             chain->timing.feedback.present_time_domain_id = chain->timing.time_domain_ids[0];
 
-        /* This could lead to problems if we have IMMEDIATE, but we ignore present timing for IMMEDIATE or MAILBOX,
-         * so there is no real risk of overflow. */
+        /* Keep enough reports for uncapped telemetry to tolerate delayed display completion. */
         if (VK_CALL(vkSetSwapchainPresentTimingQueueSizeEXT(vk_device, chain->present.vk_swapchain,
-                DXGI_MAX_SWAP_CHAIN_BUFFERS)) != VK_SUCCESS)
+                ARRAY_SIZE(chain->wait_thread.id_correlation))) != VK_SUCCESS)
         {
             ERR("Failed to set swapchain queue size.\n");
         }
@@ -2947,7 +3076,8 @@ static VkResult dxgi_vk_swap_chain_try_acquire_next_image(struct dxgi_vk_swap_ch
 }
 
 static bool dxgi_vk_swap_chain_setup_present_timing_request(
-        struct dxgi_vk_swap_chain *chain, uint64_t present_count, VkPresentTimingInfoEXT *timing_info)
+        struct dxgi_vk_swap_chain *chain, uint64_t present_count,
+        bool telemetry_requested, VkPresentTimingInfoEXT *timing_info)
 {
     bool frame_limiter_is_floating_cycle = false;
     bool use_present_timing_target;
@@ -2958,6 +3088,12 @@ static bool dxgi_vk_swap_chain_setup_present_timing_request(
     pthread_mutex_unlock(&chain->frame_rate_limit.lock);
 
     timing_info->presentStageQueries = chain->timing.present_stage;
+
+    if (telemetry_requested)
+    {
+        timing_info->presentStageQueries |= VK_PRESENT_STAGE_QUEUE_OPERATIONS_END_BIT_EXT |
+                chain->timing.telemetry_present_stage;
+    }
     /* If we're using VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL. */
     timing_info->targetTimeDomainPresentStage = chain->timing.present_stage;
 
@@ -3100,6 +3236,9 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
     uint32_t swapchain_index;
     bool pacing_should_wait;
     bool use_present_id;
+    bool use_timing_id;
+    bool telemetry_requested;
+    uint64_t timing_id;
     VkResult vk_result;
     VkQueue vk_queue;
     VkResult vr;
@@ -3207,6 +3346,32 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
     else
         use_present_id = false;
 
+    telemetry_requested = chain->present.timing && chain->timing.time_domains_count &&
+            vkd3d_atomic_uint32_load_explicit(&chain->present_telemetry.enabled,
+                    vkd3d_memory_order_acquire);
+    use_timing_id = use_present_id || telemetry_requested;
+
+    if (use_timing_id)
+    {
+        if (use_present_id)
+        {
+            timing_id = chain->present.present_id;
+        }
+        else
+        {
+            chain->present.present_id = max(chain->present.present_id + 1, present_count);
+            timing_id = chain->present.present_id;
+
+            present_id2.sType = VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR;
+            present_id2.pNext = NULL;
+            present_id2.swapchainCount = 1;
+            present_id2.pPresentIds = &timing_id;
+            vk_prepend_struct(&present_info, &present_id2);
+        }
+    }
+    else
+        timing_id = 0;
+
     if (chain->queue->device->vk_info.NV_low_latency2 && chain->request.low_latency_frame_id)
     {
         dxgi_vk_swap_chain_set_latency_marker(chain, chain->request.low_latency_frame_id,
@@ -3223,14 +3388,35 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
         timings_info.swapchainCount = 1;
         timings_info.pTimingInfos = &timing_info;
 
-        if (dxgi_vk_swap_chain_setup_present_timing_request(chain, present_count, &timing_info))
+        if (dxgi_vk_swap_chain_setup_present_timing_request(chain, present_count,
+                telemetry_requested, &timing_info))
             chain->present.present_target_enabled = true;
 
-        if (use_present_id)
+        if (use_timing_id)
             vk_prepend_struct(&present_info, &timings_info);
     }
 
+    telemetry_requested = telemetry_requested && use_timing_id;
+
     vk_queue = vkd3d_queue_acquire(chain->queue->vkd3d_queue);
+
+    if (telemetry_requested)
+    {
+        unsigned int index = present_count % ARRAY_SIZE(chain->present_telemetry.pending);
+        spinlock_acquire(&chain->present_telemetry.lock);
+
+        if (vkd3d_atomic_uint32_load_explicit(&chain->present_telemetry.enabled,
+                vkd3d_memory_order_acquire))
+        {
+            chain->present_telemetry.pending[index].present_count = present_count;
+            chain->present_telemetry.pending[index].queue_present_time_ns = vkd3d_get_current_time_ns();
+        }
+        else
+            telemetry_requested = false;
+
+        spinlock_release(&chain->present_telemetry.lock);
+    }
+
     VKD3D_REGION_BEGIN(queue_present);
     vr = VK_CALL(vkQueuePresentKHR(vk_queue, &present_info));
     VKD3D_REGION_END(queue_present);
@@ -3247,11 +3433,25 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
     if (vr == VK_SUCCESS && vk_result != VK_SUCCESS)
         vr = vk_result;
 
+    if (vr < 0 && telemetry_requested)
+    {
+        unsigned int index = present_count % ARRAY_SIZE(chain->present_telemetry.pending);
+        spinlock_acquire(&chain->present_telemetry.lock);
+        chain->present_telemetry.pending[index].present_count = 0;
+        chain->present_telemetry.pending[index].queue_present_time_ns = 0;
+        spinlock_release(&chain->present_telemetry.lock);
+    }
+
     if (vr >= 0)
         chain->present.current_backbuffer_index = UINT32_MAX;
 
     if (use_present_id && vr >= 0)
         chain->present.present_id_valid = true;
+    if (use_timing_id && vr >= 0)
+    {
+        chain->present.timing_id = timing_id;
+        chain->present.timing_id_valid = true;
+    }
 
     vkd3d_queue_timeline_trace_register_instantaneous(&chain->queue->device->queue_timeline_trace,
             VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_QUEUE_PRESENT,
@@ -3278,8 +3478,10 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
 static void dxgi_vk_swap_chain_signal_waitable_handle(struct dxgi_vk_swap_chain *chain, uint64_t present_count)
 {
     uint64_t present_id = chain->present.present_id_valid ? chain->present.present_id : 0;
+    uint64_t timing_id = chain->present.timing_id_valid ? chain->present.timing_id : 0;
 
-    dxgi_vk_swap_chain_push_present_id(chain, present_count, present_id, chain->request.begin_frame_time_ns,
+    dxgi_vk_swap_chain_push_present_id(chain, present_count, present_id, timing_id,
+            chain->request.begin_frame_time_ns,
             chain->present.present_target_enabled);
 }
 
@@ -3334,6 +3536,7 @@ static void dxgi_vk_swap_chain_present_callback(void *chain_)
 
     /* If no QueuePresentKHRs successfully commits a present ID, we'll fallback to a normal queue signal. */
     chain->present.present_id_valid = false;
+    chain->present.timing_id_valid = false;
     chain->present.present_target_enabled = false;
 
     /* A present iteration may or may not render to backbuffer. We'll apply best effort here.
@@ -3360,11 +3563,258 @@ static void dxgi_vk_swap_chain_present_callback(void *chain_)
 #endif
 }
 
-static void dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_chain *chain,
+static uint64_t dxgi_vk_swap_chain_host_counter_to_ns(uint64_t counter)
+{
+#ifdef _WIN32
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+    return counter / frequency.QuadPart * 1000000000ull +
+            counter % frequency.QuadPart * 1000000000ull / frequency.QuadPart;
+#else
+    return counter;
+#endif
+}
+
+static bool dxgi_vk_swap_chain_apply_telemetry_calibration(uint64_t host_time_ns,
+        uint64_t local_calibration, uint64_t local_time, uint64_t *time_ns)
+{
+    uint64_t delta;
+
+    if (local_time >= local_calibration)
+    {
+        delta = local_time - local_calibration;
+        if (delta > UINT64_MAX - host_time_ns)
+            return false;
+        *time_ns = host_time_ns + delta;
+    }
+    else
+    {
+        delta = local_calibration - local_time;
+        if (delta > host_time_ns)
+            return false;
+        *time_ns = host_time_ns - delta;
+    }
+
+    return true;
+}
+
+static bool dxgi_vk_swap_chain_calibrate_present_telemetry(struct dxgi_vk_swap_chain *chain,
+        VkTimeDomainKHR time_domain, uint64_t time_domain_id,
+        uint64_t queue_time, uint64_t complete_time,
+        uint64_t *queue_time_ns, uint64_t *complete_time_ns)
+{
+    const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
+    VkSwapchainCalibratedTimestampInfoEXT swapchain_infos[2];
+    VkCalibratedTimestampInfoKHR infos[3];
+    uint64_t timestamps[3];
+    uint64_t max_deviation;
+    VkTimeDomainKHR host_domain;
+    uint32_t count;
+    VkResult vr;
+
+#ifdef _WIN32
+    host_domain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR;
+#else
+    host_domain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR;
+#endif
+
+    if (time_domain == host_domain)
+    {
+        if (queue_time)
+            *queue_time_ns = dxgi_vk_swap_chain_host_counter_to_ns(queue_time);
+        if (complete_time)
+            *complete_time_ns = dxgi_vk_swap_chain_host_counter_to_ns(complete_time);
+        return true;
+    }
+
+    memset(infos, 0, sizeof(infos));
+    memset(swapchain_infos, 0, sizeof(swapchain_infos));
+    memset(timestamps, 0, sizeof(timestamps));
+
+    count = time_domain == VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT ? 3 : 2;
+    infos[0].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
+    infos[0].timeDomain = host_domain;
+    infos[1].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
+    infos[1].timeDomain = time_domain;
+
+    if (time_domain == VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT)
+    {
+        infos[2].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
+        infos[2].timeDomain = time_domain;
+
+        swapchain_infos[0].sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT;
+        swapchain_infos[0].swapchain = chain->present.vk_swapchain;
+        swapchain_infos[0].presentStage = VK_PRESENT_STAGE_QUEUE_OPERATIONS_END_BIT_EXT;
+        swapchain_infos[0].timeDomainId = time_domain_id;
+        infos[1].pNext = &swapchain_infos[0];
+
+        swapchain_infos[1].sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT;
+        swapchain_infos[1].swapchain = chain->present.vk_swapchain;
+        swapchain_infos[1].presentStage = chain->timing.telemetry_present_stage;
+        swapchain_infos[1].timeDomainId = time_domain_id;
+        infos[2].pNext = &swapchain_infos[1];
+    }
+    else if (time_domain == VK_TIME_DOMAIN_SWAPCHAIN_LOCAL_EXT)
+    {
+        swapchain_infos[0].sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT;
+        swapchain_infos[0].swapchain = chain->present.vk_swapchain;
+        swapchain_infos[0].timeDomainId = time_domain_id;
+        infos[1].pNext = &swapchain_infos[0];
+    }
+
+    max_deviation = 0;
+    vr = VK_CALL(vkGetCalibratedTimestampsKHR(chain->queue->device->vk_device,
+            count, infos, timestamps, &max_deviation));
+    if (vr != VK_SUCCESS || !timestamps[0] || !timestamps[1] || (count == 3 && !timestamps[2]))
+        return false;
+
+    timestamps[0] = dxgi_vk_swap_chain_host_counter_to_ns(timestamps[0]);
+
+    if (queue_time && !dxgi_vk_swap_chain_apply_telemetry_calibration(
+            timestamps[0], timestamps[1], queue_time, queue_time_ns))
+        return false;
+
+    return !complete_time || dxgi_vk_swap_chain_apply_telemetry_calibration(timestamps[0],
+            count == 3 ? timestamps[2] : timestamps[1], complete_time, complete_time_ns);
+}
+
+static void dxgi_vk_swap_chain_update_present_telemetry(struct dxgi_vk_swap_chain *chain,
+        uint64_t present_count, uint64_t queue_time, uint64_t complete_time,
+        VkTimeDomainKHR time_domain, uint64_t time_domain_id, uint64_t time_domain_counter)
+{
+    DXGI_VK_PRESENT_TELEMETRY data;
+    uint64_t queue_time_ns = 0;
+    uint64_t complete_time_ns = 0;
+    unsigned int index;
+
+    if (present_count == UINT64_MAX ||
+            !vkd3d_atomic_uint32_load_explicit(&chain->present_telemetry.enabled,
+                    vkd3d_memory_order_acquire))
+        return;
+
+    pthread_mutex_lock(&chain->timing.lock);
+
+    if (time_domain_counter != chain->timing.time_domain_update_count ||
+            !dxgi_vk_swap_chain_calibrate_present_telemetry(chain, time_domain, time_domain_id,
+                    queue_time, complete_time, &queue_time_ns, &complete_time_ns))
+    {
+        pthread_mutex_unlock(&chain->timing.lock);
+        return;
+    }
+
+    pthread_mutex_unlock(&chain->timing.lock);
+
+    memset(&data, 0, sizeof(data));
+    data.StructSize = sizeof(data);
+    data.PresentId = present_count;
+    data.CompletionStage = chain->timing.telemetry_present_stage;
+
+    spinlock_acquire(&chain->present_telemetry.lock);
+
+    if (!vkd3d_atomic_uint32_load_explicit(&chain->present_telemetry.enabled,
+            vkd3d_memory_order_acquire))
+    {
+        spinlock_release(&chain->present_telemetry.lock);
+        return;
+    }
+
+    index = present_count % ARRAY_SIZE(chain->present_telemetry.pending);
+
+    if (chain->present_telemetry.pending[index].present_count == present_count)
+    {
+        uint64_t present_time_ns = chain->present_telemetry.pending[index].queue_present_time_ns;
+
+        if (queue_time_ns >= present_time_ns)
+        {
+            data.ValidFields |= DXGI_VK_PRESENT_TELEMETRY_QUEUE;
+            data.QueueDurationNs = queue_time_ns - present_time_ns;
+        }
+
+        if (complete_time_ns >= present_time_ns)
+        {
+            data.ValidFields |= DXGI_VK_PRESENT_TELEMETRY_PRESENT;
+            data.PresentDurationNs = complete_time_ns - present_time_ns;
+        }
+
+        chain->present_telemetry.pending[index].present_count = 0;
+        chain->present_telemetry.pending[index].queue_present_time_ns = 0;
+    }
+
+    if (queue_time_ns && complete_time_ns >= queue_time_ns)
+    {
+        data.ValidFields |= DXGI_VK_PRESENT_TELEMETRY_DISPLAY;
+        data.DisplayDurationNs = complete_time_ns - queue_time_ns;
+    }
+
+    /* This measured visible-to-visible interval naturally reflects VRR cadence. */
+    if (chain->timing.telemetry_present_stage ==
+            VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_VISIBLE_BIT_EXT &&
+            complete_time_ns && present_count > chain->present_telemetry.previous_present_count)
+    {
+        if (chain->present_telemetry.previous_present_complete_ns &&
+                complete_time_ns > chain->present_telemetry.previous_present_complete_ns)
+        {
+            data.ValidFields |= DXGI_VK_PRESENT_TELEMETRY_INTERVAL;
+            data.DisplayIntervalNs = complete_time_ns -
+                    chain->present_telemetry.previous_present_complete_ns;
+        }
+
+        chain->present_telemetry.previous_present_count = present_count;
+        chain->present_telemetry.previous_present_complete_ns = complete_time_ns;
+    }
+
+    if (data.ValidFields)
+    {
+        chain->present_telemetry.data.StructSize = sizeof(chain->present_telemetry.data);
+        chain->present_telemetry.data.PresentId = max(
+                chain->present_telemetry.data.PresentId, data.PresentId);
+
+        if ((data.ValidFields & DXGI_VK_PRESENT_TELEMETRY_QUEUE) &&
+                data.PresentId >= chain->present_telemetry.field_present_count[0])
+        {
+            chain->present_telemetry.data.ValidFields |= DXGI_VK_PRESENT_TELEMETRY_QUEUE;
+            chain->present_telemetry.data.QueueDurationNs = data.QueueDurationNs;
+            chain->present_telemetry.field_present_count[0] = data.PresentId;
+        }
+
+        if ((data.ValidFields & DXGI_VK_PRESENT_TELEMETRY_DISPLAY) &&
+                data.PresentId >= chain->present_telemetry.field_present_count[1])
+        {
+            chain->present_telemetry.data.ValidFields |= DXGI_VK_PRESENT_TELEMETRY_DISPLAY;
+            chain->present_telemetry.data.DisplayDurationNs = data.DisplayDurationNs;
+            chain->present_telemetry.field_present_count[1] = data.PresentId;
+        }
+
+        if ((data.ValidFields & DXGI_VK_PRESENT_TELEMETRY_PRESENT) &&
+                data.PresentId >= chain->present_telemetry.field_present_count[2])
+        {
+            chain->present_telemetry.data.ValidFields |= DXGI_VK_PRESENT_TELEMETRY_PRESENT;
+            chain->present_telemetry.data.PresentDurationNs = data.PresentDurationNs;
+            chain->present_telemetry.field_present_count[2] = data.PresentId;
+        }
+
+        if ((data.ValidFields & DXGI_VK_PRESENT_TELEMETRY_INTERVAL) &&
+                data.PresentId >= chain->present_telemetry.field_present_count[3])
+        {
+            chain->present_telemetry.data.ValidFields |= DXGI_VK_PRESENT_TELEMETRY_INTERVAL;
+            chain->present_telemetry.data.DisplayIntervalNs = data.DisplayIntervalNs;
+            chain->present_telemetry.field_present_count[3] = data.PresentId;
+        }
+
+        if (data.ValidFields & (DXGI_VK_PRESENT_TELEMETRY_DISPLAY |
+                DXGI_VK_PRESENT_TELEMETRY_PRESENT | DXGI_VK_PRESENT_TELEMETRY_INTERVAL))
+            chain->present_telemetry.data.CompletionStage = data.CompletionStage;
+    }
+
+    spinlock_release(&chain->present_telemetry.lock);
+}
+
+static uint64_t dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_chain *chain,
         uint64_t present_id, uint64_t time, VkTimeDomainKHR time_domain, uint64_t time_domain_id,
         uint64_t time_domain_counter)
 {
     uint64_t present_count = UINT64_MAX;
+    bool update_frame_statistics = false;
     uint64_t calibration[2];
     bool valid_time_domain;
     unsigned int i;
@@ -3377,6 +3827,7 @@ static void dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_chai
             if (chain->wait_thread.id_correlation[i].present_id == present_id)
             {
                 present_count = chain->wait_thread.id_correlation[i].present_count;
+                update_frame_statistics = chain->wait_thread.id_correlation[i].frame_statistics;
                 chain->wait_thread.id_correlation[i] =
                         chain->wait_thread.id_correlation[--chain->wait_thread.id_correlation_count];
                 break;
@@ -3384,11 +3835,14 @@ static void dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_chai
         }
     }
 
+    if (present_count != UINT64_MAX && !update_frame_statistics)
+        return present_count;
+
     /* With latest spec update, we're allowed to calibrate timestamps here.
      * Only recalibrate timestamps as an emergency if we don't know about a spurious new domain ID. */
     pthread_mutex_lock(&chain->timing.lock);
 
-    if (present_count != UINT64_MAX)
+    if (present_count != UINT64_MAX && present_count > chain->timing.feedback.present_count)
     {
         chain->timing.feedback.present_time = time;
         chain->timing.feedback.present_count = present_count;
@@ -3398,7 +3852,7 @@ static void dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_chai
          * and the QueuePresentKHR thread will repoll the time domains as needed. */
         chain->timing.feedback.present_time_domain_id = time_domain_id;
     }
-    else
+    else if (present_count == UINT64_MAX)
     {
         if (present_id != 0)
         {
@@ -3438,14 +3892,15 @@ static void dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_chai
 
     if (i == chain->timing.time_domains_count)
     {
-        if (!dxgi_vk_swap_chain_poll_single_calibration(chain, time_domain, time_domain_id, calibration))
+        if (!dxgi_vk_swap_chain_poll_single_calibration(chain, time_domain, time_domain_id,
+                chain->timing.present_stage, calibration))
         {
             FIXME_ONCE("Failed fallback calibration.\n");
             goto unlock;
         }
     }
 
-    delta = (int64_t)time - (int64_t)chain->timing.calibration[i][1];
+    delta = (int64_t)time - (int64_t)calibration[1];
 
 #ifdef _WIN32
     {
@@ -3455,7 +3910,7 @@ static void dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_chai
     }
 #endif
 
-    time = chain->timing.calibration[i][0] + delta;
+    time = calibration[0] + delta;
 
     if (present_count > chain->frame_statistics.count)
     {
@@ -3470,25 +3925,31 @@ static void dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_chai
 
 unlock:
     pthread_mutex_unlock(&chain->timing.lock);
+    return present_count;
 }
 
 static void dxgi_vk_swap_chain_poll_past_presentation(struct dxgi_vk_swap_chain *chain)
 {
-    VkPastPresentationTimingEXT timings[DXGI_MAX_SWAP_CHAIN_BUFFERS];
-    VkPresentStageTimeEXT times[DXGI_MAX_SWAP_CHAIN_BUFFERS];
+    VkPastPresentationTimingEXT timings[DXGI_PRESENT_TIMING_QUEUE_SIZE];
+    VkPresentStageTimeEXT times[DXGI_PRESENT_TIMING_QUEUE_SIZE * 3];
     const struct vkd3d_vk_device_procs *vk_procs;
     VkPastPresentationTimingPropertiesEXT props;
     VkPastPresentationTimingInfoEXT timing_info;
     struct d3d12_device *device;
+    bool telemetry_enabled;
     bool request_props_repoll;
     VkResult vr;
     uint32_t i;
 
     device = chain->queue->device;
     vk_procs = &device->vk_procs;
+    telemetry_enabled = vkd3d_atomic_uint32_load_explicit(&chain->present_telemetry.enabled,
+            vkd3d_memory_order_acquire);
 
     memset(&timing_info, 0, sizeof(timing_info));
     timing_info.sType = VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_INFO_EXT;
+    if (telemetry_enabled)
+        timing_info.flags = VK_PAST_PRESENTATION_TIMING_ALLOW_OUT_OF_ORDER_RESULTS_BIT_EXT;
     timing_info.swapchain = chain->present.vk_swapchain;
 
     memset(&props, 0, sizeof(props));
@@ -3501,9 +3962,8 @@ static void dxgi_vk_swap_chain_poll_past_presentation(struct dxgi_vk_swap_chain 
         timings[i].sType = VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_EXT;
         timings[i].pNext = NULL;
 
-        /* We only request feedback for a single stage. */
-        timings[i].presentStageCount = 1;
-        timings[i].pPresentStages = &times[i];
+        timings[i].presentStageCount = telemetry_enabled ? 3 : 1;
+        timings[i].pPresentStages = telemetry_enabled ? &times[i * 3] : &times[i];
     }
 
     vr = VK_CALL(vkGetPastPresentationTimingEXT(device->vk_device, &timing_info, &props));
@@ -3523,6 +3983,13 @@ static void dxgi_vk_swap_chain_poll_past_presentation(struct dxgi_vk_swap_chain 
 
     for (i = 0; i < props.presentationTimingCount; i++)
     {
+        VkPresentStageTimeEXT *present_time = NULL;
+        uint64_t telemetry_complete_time = 0;
+        uint64_t telemetry_queue_time = 0;
+        VkPresentStageTimeEXT *stages = timings[i].pPresentStages;
+        uint64_t present_count;
+        uint32_t j;
+
         if (!timings[i].reportComplete)
         {
             /* This really shouldn't happen. */
@@ -3530,9 +3997,30 @@ static void dxgi_vk_swap_chain_poll_past_presentation(struct dxgi_vk_swap_chain 
             continue;
         }
 
+        if (telemetry_enabled)
+        {
+            for (j = 0; j < timings[i].presentStageCount; j++)
+            {
+                if (stages[j].stage == chain->timing.present_stage)
+                    present_time = &stages[j];
+                if (stages[j].stage == VK_PRESENT_STAGE_QUEUE_OPERATIONS_END_BIT_EXT)
+                    telemetry_queue_time = stages[j].time;
+                if (stages[j].stage == chain->timing.telemetry_present_stage)
+                    telemetry_complete_time = stages[j].time;
+            }
+        }
+        else
+            present_time = &stages[0];
+
+        if (!present_time || present_time->stage != chain->timing.present_stage)
+        {
+            FIXME("Requested present stage was not returned.\n");
+            continue;
+        }
+
         if (!chain->present.timing_relative && timings[i].targetTime)
         {
-            int64_t error_ns = times[i].time - timings[i].targetTime;
+            int64_t error_ns = present_time->time - timings[i].targetTime;
             if (chain->debug_latency)
                 INFO("Absolute timing error: %.3f ms.\n", (double)error_ns * 1e-6);
 
@@ -3541,16 +4029,16 @@ static void dxgi_vk_swap_chain_poll_past_presentation(struct dxgi_vk_swap_chain 
                 FIXME_ONCE("Driver bug, targetTime reported is way early.\n");
         }
 
-        if (times[i].stage != chain->timing.present_stage)
-        {
-            /* This really shouldn't happen. */
-            FIXME("Present stage recieved is different from requested stage.\n");
-            continue;
-        }
-
-        dxgi_vk_swap_chain_update_past_presentation(chain,
-                timings[i].presentId, times[i].time, timings[i].timeDomain, timings[i].timeDomainId,
+        present_count = dxgi_vk_swap_chain_update_past_presentation(chain,
+                timings[i].presentId, present_time->time, timings[i].timeDomain, timings[i].timeDomainId,
                 props.timeDomainsCounter);
+
+        if (telemetry_enabled)
+        {
+            dxgi_vk_swap_chain_update_present_telemetry(chain, present_count,
+                    telemetry_queue_time, telemetry_complete_time,
+                    timings[i].timeDomain, timings[i].timeDomainId, props.timeDomainsCounter);
+        }
     }
 }
 
@@ -3785,8 +4273,7 @@ static void *dxgi_vk_swap_chain_wait_worker(void *chain_)
         if (chain->present.wait && !entry.present_timing_enabled)
             dxgi_vk_swap_chain_delay_next_frame(chain, end_frame_time_ns);
 
-        /* If we're rendering with IMMEDIATE, we ignore present timing. */
-        if (chain->present.timing && entry.id)
+        if (chain->present.timing && entry.timing_id)
         {
             if (chain->wait_thread.id_correlation_count == ARRAY_SIZE(chain->wait_thread.id_correlation))
             {
@@ -3796,7 +4283,8 @@ static void *dxgi_vk_swap_chain_wait_worker(void *chain_)
             }
 
             chain->wait_thread.id_correlation[chain->wait_thread.id_correlation_count].present_count = entry.present_count;
-            chain->wait_thread.id_correlation[chain->wait_thread.id_correlation_count].present_id = entry.id;
+            chain->wait_thread.id_correlation[chain->wait_thread.id_correlation_count].present_id = entry.timing_id;
+            chain->wait_thread.id_correlation[chain->wait_thread.id_correlation_count].frame_statistics = entry.id != 0;
             chain->wait_thread.id_correlation_count++;
         }
 
@@ -4017,6 +4505,7 @@ static HRESULT dxgi_vk_swap_chain_init(struct dxgi_vk_swap_chain *chain, IDXGIVk
     HRESULT hr;
 
     chain->IDXGIVkSwapChain_iface.lpVtbl = &dxgi_vk_swap_chain_vtbl;
+    chain->IDXGIVkSwapChainPresentTelemetry_iface.lpVtbl = &dxgi_vk_swap_chain_present_telemetry_vtbl;
     chain->refcount = 1;
     chain->internal_refcount = 1;
     chain->queue = queue;
