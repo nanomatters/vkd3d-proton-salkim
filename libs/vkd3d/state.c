@@ -8011,20 +8011,34 @@ static HRESULT vkd3d_bindless_state_init_heap(struct vkd3d_bindless_state *bindl
     bool unified_buffer_descriptor = false;
 
     if (!device->device_info.descriptor_heap_features.descriptorHeap)
+    {
+        if (VKD3D_CONFIG_FLAG_IS_SET(DESCRIPTOR_HEAP))
+            INFO("Descriptor heap requested, but the feature is unavailable. Falling back to legacy descriptors.\n");
         return E_NOTIMPL;
+    }
 
     if (device_info->properties2.properties.limits.minStorageBufferOffsetAlignment > 16)
+    {
+        INFO("Descriptor heap requires SSBO alignment <= 16, got %"PRIu64". Falling back to legacy descriptors.\n",
+                device_info->properties2.properties.limits.minStorageBufferOffsetAlignment);
         return E_NOTIMPL;
+    }
 
     /* Ignore heap if we're on a non-happy path. */
     if (vkd3d_descriptor_debug_active_descriptor_qa_checks() || vkd3d_descriptor_debug_active_instruction_qa_checks())
+    {
+        INFO("Descriptor/instruction QA is active. Falling back to legacy descriptors.\n");
         return E_NOTIMPL;
+    }
 
 #ifdef VKD3D_ENABLE_PROFILING
     /* For now, we don't do vtable variant shenanigans for profiled devices.
      * This can be fixed, but it's not that important at this time. */
     if (vkd3d_uses_profiling())
+    {
+        INFO("Profiling is active. Falling back to legacy descriptors.\n");
         return E_NOTIMPL;
+    }
 #endif
 
     bindless_state->cbv_srv_uav_size = max(
