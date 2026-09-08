@@ -9363,11 +9363,7 @@ static HRESULT d3d12_descriptor_heap_create_descriptor_heap(struct d3d12_descrip
         if (FAILED(hr = vkd3d_allocate_internal_buffer_memory(device, descriptor_heap->descriptor_buffer.vk_buffer,
                 property_flags, allocate_flags,
                 &descriptor_heap->descriptor_buffer.device_allocation)))
-        {
-            VK_CALL(vkDestroyBuffer(device->vk_device, descriptor_heap->descriptor_buffer.vk_buffer, NULL));
-            descriptor_heap->descriptor_buffer.vk_buffer = VK_NULL_HANDLE;
             return hr;
-        }
 
         descriptor_heap->descriptor_buffer.va =
                 vkd3d_get_buffer_device_address(device, descriptor_heap->descriptor_buffer.vk_buffer);
@@ -9377,8 +9373,6 @@ static HRESULT d3d12_descriptor_heap_create_descriptor_heap(struct d3d12_descrip
                 0, VK_WHOLE_SIZE, 0, (void**)&descriptor_heap->descriptor_buffer.host_allocation))))
         {
             ERR("Failed to map descriptor set memory.\n");
-            vkd3d_free_device_memory(device, &descriptor_heap->descriptor_buffer.device_allocation);
-            VK_CALL(vkDestroyBuffer(device->vk_device, descriptor_heap->descriptor_buffer.vk_buffer, NULL));
             return hresult_from_vk_result(vr);
         }
     }
