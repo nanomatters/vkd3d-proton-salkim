@@ -9258,6 +9258,9 @@ static HRESULT d3d12_descriptor_heap_create_descriptor_heap(struct d3d12_descrip
             pthread_mutex_init(&descriptor_heap->meta_descriptor_lock, NULL);
             descriptor_heap->meta_descriptor_indices = vkd3d_malloc(
                 VKD3D_DESCRIPTOR_HEAP_META_DESCRIPTOR_COUNT * sizeof(uint32_t));
+            if (!descriptor_heap->meta_descriptor_indices)
+                return E_OUTOFMEMORY;
+
             for (i = 0; i < VKD3D_DESCRIPTOR_HEAP_META_DESCRIPTOR_COUNT; i++)
             {
                 /* All meta shaders use a simple stride from base. */
@@ -10483,7 +10486,8 @@ void d3d12_descriptor_heap_cleanup(struct d3d12_descriptor_heap *descriptor_heap
         if (descriptor_heap->desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
             (descriptor_heap->desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
         {
-            if (descriptor_heap->meta_descriptor_index_count != VKD3D_DESCRIPTOR_HEAP_META_DESCRIPTOR_COUNT)
+            if (descriptor_heap->meta_descriptor_indices &&
+                    descriptor_heap->meta_descriptor_index_count != VKD3D_DESCRIPTOR_HEAP_META_DESCRIPTOR_COUNT)
             {
                 FIXME("Mismatch in meta descriptors. Expected VKD3D_DESCRIPTOR_HEAP_META_DESCRIPTOR_COUNT, got %zu.\n",
                         descriptor_heap->meta_descriptor_index_count);
