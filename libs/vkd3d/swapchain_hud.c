@@ -131,7 +131,8 @@ void vkd3d_swapchain_hud_cleanup(struct vkd3d_swapchain_hud *hud,
 
 bool vkd3d_swapchain_hud_record(struct vkd3d_swapchain_hud *hud,
         struct d3d12_device *device, VkCommandBuffer vk_cmd, uint32_t swapchain_index,
-        VkFormat format, uint32_t width, uint32_t height, DXGI_COLOR_SPACE_TYPE color_space,
+        VkFormat format, uint32_t width, uint32_t height, VkExtent2D layout_extent,
+        DXGI_COLOR_SPACE_TYPE color_space,
         const DXGI_VK_HUD_VERTEX *vertices, uint32_t vertex_count, float scale, float opacity,
         const uint8_t *font_data, uint32_t font_data_size, uint32_t font_width, uint32_t font_height)
 {
@@ -145,7 +146,7 @@ bool vkd3d_swapchain_hud_record(struct vkd3d_swapchain_hud *hud,
     VkRect2D scissor;
     HRESULT hr;
 
-    if (!vertex_count || hud->failed)
+    if (!vertex_count || hud->failed || !layout_extent.width || !layout_extent.height)
         return false;
 
     if (swapchain_index >= ARRAY_SIZE(hud->vertex_buffers) ||
@@ -184,8 +185,10 @@ bool vkd3d_swapchain_hud_record(struct vkd3d_swapchain_hud *hud,
     writes[1].pBufferInfo = &buffer_info[1];
 
     memset(&push_constants, 0, sizeof(push_constants));
-    push_constants.surface_size[0] = width;
-    push_constants.surface_size[1] = height;
+    /* DXGI lays out vertices in user-backbuffer pixels. Normalize in that
+     * space, then let the viewport map them to the actual presentation image. */
+    push_constants.surface_size[0] = layout_extent.width;
+    push_constants.surface_size[1] = layout_extent.height;
     push_constants.opacity = opacity;
     push_constants.scale = scale;
     push_constants.output_mode = vkd3d_swapchain_hud_output_mode(format, color_space);
