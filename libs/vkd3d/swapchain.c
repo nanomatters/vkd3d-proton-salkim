@@ -122,6 +122,7 @@ struct dxgi_vk_swap_chain_hud_frame
     DXGI_VK_HUD_VERTEX *vertices;
     size_t vertices_size;
     uint32_t vertex_count;
+    VkExtent2D layout_extent;
     float scale;
     float opacity;
 };
@@ -1562,6 +1563,9 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetHudData(IDXGIVkSwapChainH
         memcpy(chain->user.hud.vertices, data->pVertices,
                 data->VertexCount * sizeof(*data->pVertices));
     chain->user.hud.vertex_count = data->VertexCount;
+    /* Keep the vertex coordinate space with the queued frame across resizes. */
+    chain->user.hud.layout_extent.width = chain->desc.Width;
+    chain->user.hud.layout_extent.height = chain->desc.Height;
     chain->user.hud.scale = data->Scale;
     chain->user.hud.opacity = data->Opacity;
     chain->hud.enabled = true;
@@ -2800,6 +2804,7 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
             vkd3d_swapchain_hud_record(&chain->hud.renderer, chain->queue->device,
                     vk_cmd, swapchain_index, chain->present.backbuffer_format,
                     chain->present.backbuffer_width, chain->present.backbuffer_height,
+                    chain->request.hud.layout_extent,
                     chain->request.dxgi_color_space_type, chain->request.hud.vertices,
                     chain->request.hud.vertex_count, chain->request.hud.scale,
                     chain->request.hud.opacity, chain->hud.font_data,
@@ -2833,6 +2838,7 @@ static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *cha
             vkd3d_swapchain_hud_record(&chain->hud.renderer, chain->queue->device,
                     vk_cmd, swapchain_index, chain->present.backbuffer_format,
                     chain->present.backbuffer_width, chain->present.backbuffer_height,
+                    chain->request.hud.layout_extent,
                     chain->request.dxgi_color_space_type, chain->request.hud.vertices,
                     chain->request.hud.vertex_count, chain->request.hud.scale,
                     chain->request.hud.opacity, chain->hud.font_data,
