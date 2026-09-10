@@ -45,7 +45,8 @@ void vkd3d_swapchain_hud_cleanup(struct vkd3d_swapchain_hud *hud,
 
 bool vkd3d_swapchain_hud_record(struct vkd3d_swapchain_hud *hud,
         struct d3d12_device *device, VkCommandBuffer vk_cmd, uint32_t swapchain_index,
-        VkFormat format, uint32_t width, uint32_t height, DXGI_COLOR_SPACE_TYPE color_space,
+        VkFormat format, uint32_t width, uint32_t height, VkExtent2D layout_extent,
+        DXGI_COLOR_SPACE_TYPE color_space,
         const DXGI_VK_HUD_VERTEX *vertices, uint32_t vertex_count, float scale, float opacity,
         const uint8_t *font_data, uint32_t font_data_size, uint32_t font_width, uint32_t font_height);
 
