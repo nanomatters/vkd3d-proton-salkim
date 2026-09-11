@@ -3469,6 +3469,15 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
     if (vr == VK_SUCCESS && vk_result != VK_SUCCESS)
         vr = vk_result;
 
+    if (chain->swapchain_maintenance1 &&
+            (vr == VK_ERROR_OUT_OF_HOST_MEMORY || vr == VK_ERROR_OUT_OF_DEVICE_MEMORY))
+    {
+        /* No presentation was queued, so its fence will not signal. The blit
+         * was submitted and must finish before we destroy its resources. */
+        chain->present.vk_swapchain_fences_signalled[chain->present.swapchain_fence_index] = false;
+        dxgi_vk_swap_chain_drain_internal_blit_semaphore(chain, chain->present.internal_blit_count);
+    }
+
     if (vr < 0 && timing_requested)
         dxgi_vk_swap_chain_take_present_timing(chain, timing_id);
 
