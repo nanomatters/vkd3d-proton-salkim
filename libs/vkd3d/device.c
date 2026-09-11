@@ -7301,10 +7301,10 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_SetEventOnMultipleFenceCompletion(
     wait_type = (flags & D3D12_MULTIPLE_FENCE_WAIT_FLAG_ANY)
             ? VKD3D_WAITING_EVENT_MULTI_ANY : VKD3D_WAITING_EVENT_MULTI_ALL;
 
-    if (!event && wait_type == VKD3D_WAITING_EVENT_MULTI_ANY)
+    if (!event)
     {
-        /* We need to stall the calling thread if any fence gets signaled.
-         * Create a temporary event and wait for it later. */
+        /* Register all fences before blocking, including for WAIT_ALL.
+         * Use a temporary event to wait for the aggregate completion. */
         hr = vkd3d_native_sync_handle_create(0, VKD3D_NATIVE_SYNC_HANDLE_TYPE_EVENT, &handle);
 
         if (FAILED(hr))
@@ -7320,7 +7320,11 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_SetEventOnMultipleFenceCompletion(
 
     /* Each fence that processes this wait will decrement the payload
      * counter by 1, and only signal the event if the signal bit is set */
-    payload = vkd3d_malloc(sizeof(*payload));
+    if (!(payload = vkd3d_malloc(sizeof(*payload))))
+    {
+        hr = E_OUTOFMEMORY;
+        goto fail;
+    }
     *payload = fence_count | VKD3D_WAITING_EVENT_SIGNAL_BIT;
 
     for (i = 0; i < fence_count; i++)
@@ -7347,7 +7351,7 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_SetEventOnMultipleFenceCompletion(
         }
     }
 
-    if (!event && wait_type == VKD3D_WAITING_EVENT_MULTI_ANY)
+    if (!event)
     {
         hr = vkd3d_native_sync_handle_acquire(handle) ? S_OK : E_FAIL;
         vkd3d_native_sync_handle_destroy(handle);
@@ -7361,7 +7365,7 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_SetEventOnMultipleFenceCompletion(
     return S_OK;
 
 fail:
-    if (!event && wait_type == VKD3D_WAITING_EVENT_MULTI_ANY)
+    if (!event)
         vkd3d_native_sync_handle_destroy(handle);
 
     return hr;
