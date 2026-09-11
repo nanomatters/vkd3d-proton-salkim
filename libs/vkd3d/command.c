@@ -3358,8 +3358,12 @@ uint32_t d3d12_command_allocator_allocate_meta_index(
         return index;
     }
 
-    vkd3d_array_reserve((void**)&allocator->meta_allocs, &allocator->meta_allocs_size,
-            allocator->meta_allocs_count + 1, sizeof(*allocator->meta_allocs));
+    if (!vkd3d_array_reserve((void**)&allocator->meta_allocs, &allocator->meta_allocs_size,
+            allocator->meta_allocs_count + 1, sizeof(*allocator->meta_allocs)))
+    {
+        d3d12_descriptor_heap_free_meta_index(heap, index);
+        return UINT32_MAX;
+    }
     allocator->meta_allocs[allocator->meta_allocs_count].heap = heap;
     allocator->meta_allocs[allocator->meta_allocs_count].index = index;
     allocator->meta_allocs_count++;
