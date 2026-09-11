@@ -3112,8 +3112,10 @@ static bool dxgi_vk_swap_chain_setup_present_timing_request(
 #define VRR_INTERVAL UINT64_MAX
 
     /* Present timing targets only work on FIFO modes.
-     * Don't bother trying to get timing feedback for non-FIFO modes. */
+     * Require a requested interval even with forced FIFO. Timing feedback
+     * can still be collected without a pacing target. */
     use_present_timing_target =
+            (chain->request.swap_interval || frame_limiter_ns) &&
             present_mode_supports_timing(chain->present.selected_present_mode, chain->request.swap_interval) &&
             present_count > chain->timing.feedback.present_count &&
             chain->timing.feedback.present_count &&
