@@ -149,10 +149,17 @@ struct dxgi_vk_swap_chain_present_request
 struct present_wait_entry
 {
     uint64_t id;
-    uint64_t timing_id;
     uint64_t present_count;
     uint64_t begin_frame_time_ns;
     bool present_timing_enabled;
+};
+
+struct present_timing_entry
+{
+    uint64_t present_id;
+    uint64_t present_count;
+    uint64_t queue_present_time_ns;
+    bool frame_statistics;
 };
 
 #if defined(_WIN32)
@@ -248,9 +255,7 @@ struct dxgi_vk_swap_chain
 
         /* PresentID is used depending on features and if we're really presenting on-screen. */
         uint64_t present_id;
-        uint64_t timing_id;
         bool present_id_valid;
-        bool timing_id_valid;
         bool present_target_enabled;
 
         /* Atomically updated after a PRESENT queue command has processed. Used to atomically check if
@@ -357,11 +362,8 @@ struct dxgi_vk_swap_chain
         DXGI_VK_PRESENT_TELEMETRY data;
         uint64_t field_present_count[4];
 
-        struct
-        {
-            uint64_t present_count;
-            uint64_t queue_present_time_ns;
-        } pending[DXGI_PRESENT_TIMING_QUEUE_SIZE];
+        /* A slot remains occupied until its complete driver report is consumed. */
+        struct present_timing_entry pending[DXGI_PRESENT_TIMING_QUEUE_SIZE];
 
         uint64_t previous_present_count;
         uint64_t previous_present_complete_ns;
@@ -398,14 +400,6 @@ struct dxgi_vk_swap_chain
         pthread_cond_t cond;
         pthread_mutex_t lock;
         bool skip_waits;
-
-        struct
-        {
-            uint64_t present_id;
-            uint64_t present_count;
-            bool frame_statistics;
-        } id_correlation[DXGI_PRESENT_TIMING_QUEUE_SIZE];
-        unsigned int id_correlation_count;
 
         /* Detect when we need to signal for repoll. Only
          * accessed by wait thread. */
@@ -560,7 +554,7 @@ static void dxgi_vk_swap_chain_drain_queue(struct dxgi_vk_swap_chain *chain)
 }
 
 static void dxgi_vk_swap_chain_push_present_id(struct dxgi_vk_swap_chain *chain,
-        uint64_t present_count, uint64_t present_id, uint64_t timing_id,
+        uint64_t present_count, uint64_t present_id,
         uint64_t begin_frame_time_ns, bool present_timing_enabled)
 {
     struct present_wait_entry *entry;
@@ -569,7 +563,6 @@ static void dxgi_vk_swap_chain_push_present_id(struct dxgi_vk_swap_chain *chain,
             chain->wait_thread.wait_queue_count + 1, sizeof(*chain->wait_thread.wait_queue));
     entry = &chain->wait_thread.wait_queue[chain->wait_thread.wait_queue_count++];
     entry->id = present_id;
-    entry->timing_id = timing_id;
     entry->present_count = present_count;
     entry->begin_frame_time_ns = begin_frame_time_ns;
     entry->present_timing_enabled = present_timing_enabled;
@@ -595,7 +588,7 @@ static void dxgi_vk_swap_chain_cleanup_low_latency(struct dxgi_vk_swap_chain *ch
 
 static void dxgi_vk_swap_chain_cleanup_waiter_thread(struct dxgi_vk_swap_chain *chain)
 {
-    dxgi_vk_swap_chain_push_present_id(chain, 0, 0, 0, 0, true);
+    dxgi_vk_swap_chain_push_present_id(chain, 0, 0, 0, true);
     pthread_join(chain->wait_thread.thread, NULL);
     pthread_mutex_destroy(&chain->wait_thread.lock);
     pthread_cond_destroy(&chain->wait_thread.cond);
@@ -773,11 +766,11 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_present_telemetry_SetEnabled
 
     if (!enable)
     {
+        /* Disabling telemetry does not release outstanding driver timing slots. */
         spinlock_acquire(&chain->present_telemetry.lock);
         memset(&chain->present_telemetry.data, 0, sizeof(chain->present_telemetry.data));
         memset(chain->present_telemetry.field_present_count, 0,
                 sizeof(chain->present_telemetry.field_present_count));
-        memset(chain->present_telemetry.pending, 0, sizeof(chain->present_telemetry.pending));
         chain->present_telemetry.previous_present_count = 0;
         chain->present_telemetry.previous_present_complete_ns = 0;
         spinlock_release(&chain->present_telemetry.lock);
@@ -1932,10 +1925,8 @@ static void dxgi_vk_swap_chain_destroy_swapchain_in_present_task(struct dxgi_vk_
     chain->present.backbuffer_count = 0;
     chain->present.force_swapchain_recreation = false;
     chain->present.present_id_valid = false;
-    chain->present.timing_id_valid = false;
     chain->present.present_target_enabled = false;
     chain->present.present_id = 0;
-    chain->present.timing_id = 0;
     chain->present.current_backbuffer_index = UINT32_MAX;
 
     spinlock_acquire(&chain->present_telemetry.lock);
@@ -2503,11 +2494,12 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
         if (chain->timing.time_domains_count)
             chain->timing.feedback.present_time_domain_id = chain->timing.time_domain_ids[0];
 
-        /* Keep enough reports for uncapped telemetry to tolerate delayed display completion. */
+        /* Match the number of outstanding requests we can track. */
         if (VK_CALL(vkSetSwapchainPresentTimingQueueSizeEXT(vk_device, chain->present.vk_swapchain,
-                ARRAY_SIZE(chain->wait_thread.id_correlation))) != VK_SUCCESS)
+                ARRAY_SIZE(chain->present_telemetry.pending))) != VK_SUCCESS)
         {
             ERR("Failed to set swapchain queue size.\n");
+            chain->present.timing = false;
         }
     }
 
@@ -3229,6 +3221,49 @@ static bool dxgi_vk_swap_chain_setup_present_timing_request(
     return use_present_timing_target;
 }
 
+static bool dxgi_vk_swap_chain_track_present_timing(struct dxgi_vk_swap_chain *chain,
+        uint64_t present_id, uint64_t present_count, bool frame_statistics, bool telemetry_requested)
+{
+    struct present_timing_entry *entry;
+    unsigned int i;
+
+    spinlock_acquire(&chain->present_telemetry.lock);
+    for (i = 0; i < ARRAY_SIZE(chain->present_telemetry.pending); i++)
+    {
+        entry = &chain->present_telemetry.pending[i];
+        if (entry->present_id)
+            continue;
+
+        entry->present_id = present_id;
+        entry->present_count = present_count;
+        entry->frame_statistics = frame_statistics;
+        entry->queue_present_time_ns = telemetry_requested ? vkd3d_get_current_time_ns() : 0;
+        break;
+    }
+    spinlock_release(&chain->present_telemetry.lock);
+    return i < ARRAY_SIZE(chain->present_telemetry.pending);
+}
+
+static struct present_timing_entry dxgi_vk_swap_chain_take_present_timing(
+        struct dxgi_vk_swap_chain *chain, uint64_t present_id)
+{
+    struct present_timing_entry entry = {0};
+    unsigned int i;
+
+    spinlock_acquire(&chain->present_telemetry.lock);
+    for (i = 0; i < ARRAY_SIZE(chain->present_telemetry.pending); i++)
+    {
+        if (chain->present_telemetry.pending[i].present_id != present_id)
+            continue;
+
+        entry = chain->present_telemetry.pending[i];
+        memset(&chain->present_telemetry.pending[i], 0, sizeof(entry));
+        break;
+    }
+    spinlock_release(&chain->present_telemetry.lock);
+    return entry;
+}
+
 static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chain, uint64_t present_count, unsigned int retry_counter)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
@@ -3243,6 +3278,7 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
     bool pacing_should_wait;
     bool use_present_id;
     bool use_timing_id;
+    bool timing_requested = false;
     bool telemetry_requested;
     uint64_t timing_id;
     VkResult vk_result;
@@ -3402,25 +3438,17 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
             vk_prepend_struct(&present_info, &timings_info);
     }
 
-    telemetry_requested = telemetry_requested && use_timing_id;
-
     vk_queue = vkd3d_queue_acquire(chain->queue->vkd3d_queue);
 
-    if (telemetry_requested)
+    if (use_timing_id && chain->present.timing && chain->timing.time_domains_count)
     {
-        unsigned int index = present_count % ARRAY_SIZE(chain->present_telemetry.pending);
-        spinlock_acquire(&chain->present_telemetry.lock);
-
-        if (vkd3d_atomic_uint32_load_explicit(&chain->present_telemetry.enabled,
-                vkd3d_memory_order_acquire))
-        {
-            chain->present_telemetry.pending[index].present_count = present_count;
-            chain->present_telemetry.pending[index].queue_present_time_ns = vkd3d_get_current_time_ns();
-        }
-        else
-            telemetry_requested = false;
-
-        spinlock_release(&chain->present_telemetry.lock);
+        /* Register before submission: the wait thread may retrieve this report
+         * before it processes this frame's wait entry. Never request more reports
+         * than the driver queue can hold. Present IDs and pacing are independent. */
+        timing_requested = dxgi_vk_swap_chain_track_present_timing(chain,
+                timing_id, present_count, use_present_id, telemetry_requested);
+        if (!timing_requested)
+            timing_info.presentStageQueries = 0;
     }
 
     VKD3D_REGION_BEGIN(queue_present);
@@ -3439,25 +3467,14 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
     if (vr == VK_SUCCESS && vk_result != VK_SUCCESS)
         vr = vk_result;
 
-    if (vr < 0 && telemetry_requested)
-    {
-        unsigned int index = present_count % ARRAY_SIZE(chain->present_telemetry.pending);
-        spinlock_acquire(&chain->present_telemetry.lock);
-        chain->present_telemetry.pending[index].present_count = 0;
-        chain->present_telemetry.pending[index].queue_present_time_ns = 0;
-        spinlock_release(&chain->present_telemetry.lock);
-    }
+    if (vr < 0 && timing_requested)
+        dxgi_vk_swap_chain_take_present_timing(chain, timing_id);
 
     if (vr >= 0)
         chain->present.current_backbuffer_index = UINT32_MAX;
 
     if (use_present_id && vr >= 0)
         chain->present.present_id_valid = true;
-    if (use_timing_id && vr >= 0)
-    {
-        chain->present.timing_id = timing_id;
-        chain->present.timing_id_valid = true;
-    }
 
     vkd3d_queue_timeline_trace_register_instantaneous(&chain->queue->device->queue_timeline_trace,
             VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_QUEUE_PRESENT,
@@ -3484,9 +3501,8 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
 static void dxgi_vk_swap_chain_signal_waitable_handle(struct dxgi_vk_swap_chain *chain, uint64_t present_count)
 {
     uint64_t present_id = chain->present.present_id_valid ? chain->present.present_id : 0;
-    uint64_t timing_id = chain->present.timing_id_valid ? chain->present.timing_id : 0;
 
-    dxgi_vk_swap_chain_push_present_id(chain, present_count, present_id, timing_id,
+    dxgi_vk_swap_chain_push_present_id(chain, present_count, present_id,
             chain->request.begin_frame_time_ns,
             chain->present.present_target_enabled);
 }
@@ -3542,7 +3558,6 @@ static void dxgi_vk_swap_chain_present_callback(void *chain_)
 
     /* If no QueuePresentKHRs successfully commits a present ID, we'll fallback to a normal queue signal. */
     chain->present.present_id_valid = false;
-    chain->present.timing_id_valid = false;
     chain->present.present_target_enabled = false;
 
     /* A present iteration may or may not render to backbuffer. We'll apply best effort here.
@@ -3685,15 +3700,16 @@ static bool dxgi_vk_swap_chain_calibrate_present_telemetry(struct dxgi_vk_swap_c
 }
 
 static void dxgi_vk_swap_chain_update_present_telemetry(struct dxgi_vk_swap_chain *chain,
-        uint64_t present_count, uint64_t queue_time, uint64_t complete_time,
+        const struct present_timing_entry *entry, uint64_t queue_time, uint64_t complete_time,
         VkTimeDomainKHR time_domain, uint64_t time_domain_id, uint64_t time_domain_counter)
 {
     DXGI_VK_PRESENT_TELEMETRY data;
+    uint64_t present_count = entry->present_count;
+    uint64_t present_time_ns = entry->queue_present_time_ns;
     uint64_t queue_time_ns = 0;
     uint64_t complete_time_ns = 0;
-    unsigned int index;
 
-    if (present_count == UINT64_MAX ||
+    if (!present_time_ns ||
             !vkd3d_atomic_uint32_load_explicit(&chain->present_telemetry.enabled,
                     vkd3d_memory_order_acquire))
         return;
@@ -3724,26 +3740,16 @@ static void dxgi_vk_swap_chain_update_present_telemetry(struct dxgi_vk_swap_chai
         return;
     }
 
-    index = present_count % ARRAY_SIZE(chain->present_telemetry.pending);
-
-    if (chain->present_telemetry.pending[index].present_count == present_count)
+    if (queue_time_ns >= present_time_ns)
     {
-        uint64_t present_time_ns = chain->present_telemetry.pending[index].queue_present_time_ns;
+        data.ValidFields |= DXGI_VK_PRESENT_TELEMETRY_QUEUE;
+        data.QueueDurationNs = queue_time_ns - present_time_ns;
+    }
 
-        if (queue_time_ns >= present_time_ns)
-        {
-            data.ValidFields |= DXGI_VK_PRESENT_TELEMETRY_QUEUE;
-            data.QueueDurationNs = queue_time_ns - present_time_ns;
-        }
-
-        if (complete_time_ns >= present_time_ns)
-        {
-            data.ValidFields |= DXGI_VK_PRESENT_TELEMETRY_PRESENT;
-            data.PresentDurationNs = complete_time_ns - present_time_ns;
-        }
-
-        chain->present_telemetry.pending[index].present_count = 0;
-        chain->present_telemetry.pending[index].queue_present_time_ns = 0;
+    if (complete_time_ns >= present_time_ns)
+    {
+        data.ValidFields |= DXGI_VK_PRESENT_TELEMETRY_PRESENT;
+        data.PresentDurationNs = complete_time_ns - present_time_ns;
     }
 
     if (queue_time_ns && complete_time_ns >= queue_time_ns)
@@ -3757,7 +3763,8 @@ static void dxgi_vk_swap_chain_update_present_telemetry(struct dxgi_vk_swap_chai
             VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_VISIBLE_BIT_EXT &&
             complete_time_ns && present_count > chain->present_telemetry.previous_present_count)
     {
-        if (chain->present_telemetry.previous_present_complete_ns &&
+        if (present_count == chain->present_telemetry.previous_present_count + 1 &&
+                chain->present_telemetry.previous_present_complete_ns &&
                 complete_time_ns > chain->present_telemetry.previous_present_complete_ns)
         {
             data.ValidFields |= DXGI_VK_PRESENT_TELEMETRY_INTERVAL;
@@ -3815,40 +3822,24 @@ static void dxgi_vk_swap_chain_update_present_telemetry(struct dxgi_vk_swap_chai
     spinlock_release(&chain->present_telemetry.lock);
 }
 
-static uint64_t dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_chain *chain,
-        uint64_t present_id, uint64_t time, VkTimeDomainKHR time_domain, uint64_t time_domain_id,
+static void dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_chain *chain,
+        const struct present_timing_entry *entry, uint64_t time, VkTimeDomainKHR time_domain, uint64_t time_domain_id,
         uint64_t time_domain_counter)
 {
-    uint64_t present_count = UINT64_MAX;
-    bool update_frame_statistics = false;
+    uint64_t present_count = entry->present_count;
     uint64_t calibration[2];
     bool valid_time_domain;
     unsigned int i;
     int64_t delta;
 
-    if (present_id)
-    {
-        for (i = 0; i < chain->wait_thread.id_correlation_count; i++)
-        {
-            if (chain->wait_thread.id_correlation[i].present_id == present_id)
-            {
-                present_count = chain->wait_thread.id_correlation[i].present_count;
-                update_frame_statistics = chain->wait_thread.id_correlation[i].frame_statistics;
-                chain->wait_thread.id_correlation[i] =
-                        chain->wait_thread.id_correlation[--chain->wait_thread.id_correlation_count];
-                break;
-            }
-        }
-    }
-
-    if (present_count != UINT64_MAX && !update_frame_statistics)
-        return present_count;
+    if (!entry->frame_statistics)
+        return;
 
     /* With latest spec update, we're allowed to calibrate timestamps here.
      * Only recalibrate timestamps as an emergency if we don't know about a spurious new domain ID. */
     pthread_mutex_lock(&chain->timing.lock);
 
-    if (present_count != UINT64_MAX && present_count > chain->timing.feedback.present_count)
+    if (present_count > chain->timing.feedback.present_count)
     {
         chain->timing.feedback.present_time = time;
         chain->timing.feedback.present_count = present_count;
@@ -3857,23 +3848,6 @@ static uint64_t dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_
          * but it doesn't necessarily have to. The new times are in terms of that domain ID
          * and the QueuePresentKHR thread will repoll the time domains as needed. */
         chain->timing.feedback.present_time_domain_id = time_domain_id;
-    }
-    else if (present_count == UINT64_MAX)
-    {
-        if (present_id != 0)
-        {
-            FIXME("Could not correlate present ID with present count.\n");
-        }
-        else
-        {
-            /* If we're doing IMMEDIATE, we drop the use of present timing.
-             * Wait until we re-latch to actual FIFO. */
-            chain->timing.feedback.present_time = 0;
-            chain->timing.feedback.present_count = 0;
-            chain->timing.feedback.present_time_domain_id = 0;
-        }
-
-        goto unlock;
     }
 
     valid_time_domain = time_domain_counter == chain->timing.time_domain_update_count;
@@ -3931,7 +3905,6 @@ static uint64_t dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_
 
 unlock:
     pthread_mutex_unlock(&chain->timing.lock);
-    return present_count;
 }
 
 static void dxgi_vk_swap_chain_poll_past_presentation(struct dxgi_vk_swap_chain *chain)
@@ -3968,8 +3941,9 @@ static void dxgi_vk_swap_chain_poll_past_presentation(struct dxgi_vk_swap_chain 
         timings[i].sType = VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_EXT;
         timings[i].pNext = NULL;
 
-        timings[i].presentStageCount = telemetry_enabled ? 3 : 1;
-        timings[i].pPresentStages = telemetry_enabled ? &times[i * 3] : &times[i];
+        /* Previously requested stages remain pending when telemetry is disabled. */
+        timings[i].presentStageCount = 3;
+        timings[i].pPresentStages = &times[i * 3];
     }
 
     vr = VK_CALL(vkGetPastPresentationTimingEXT(device->vk_device, &timing_info, &props));
@@ -3993,38 +3967,29 @@ static void dxgi_vk_swap_chain_poll_past_presentation(struct dxgi_vk_swap_chain 
         uint64_t telemetry_complete_time = 0;
         uint64_t telemetry_queue_time = 0;
         VkPresentStageTimeEXT *stages = timings[i].pPresentStages;
-        uint64_t present_count;
+        struct present_timing_entry entry;
         uint32_t j;
 
         if (!timings[i].reportComplete)
-        {
-            /* This really shouldn't happen. */
-            ERR("Implementation bug, report is not marked complete.\n");
             continue;
-        }
 
-        if (telemetry_enabled)
-        {
-            for (j = 0; j < timings[i].presentStageCount; j++)
-            {
-                if (stages[j].stage == chain->timing.present_stage)
-                    present_time = &stages[j];
-                if (stages[j].stage == VK_PRESENT_STAGE_QUEUE_OPERATIONS_END_BIT_EXT)
-                    telemetry_queue_time = stages[j].time;
-                if (stages[j].stage == chain->timing.telemetry_present_stage)
-                    telemetry_complete_time = stages[j].time;
-            }
-        }
-        else
-            present_time = &stages[0];
-
-        if (!present_time || present_time->stage != chain->timing.present_stage)
-        {
-            FIXME("Requested present stage was not returned.\n");
+        /* Complete reports release driver slots even when their timestamps
+         * are missing or cannot be calibrated. Do this before validating them. */
+        entry = dxgi_vk_swap_chain_take_present_timing(chain, timings[i].presentId);
+        if (!entry.present_id)
             continue;
+
+        for (j = 0; j < timings[i].presentStageCount; j++)
+        {
+            if (stages[j].stage == chain->timing.present_stage)
+                present_time = &stages[j];
+            if (stages[j].stage == VK_PRESENT_STAGE_QUEUE_OPERATIONS_END_BIT_EXT)
+                telemetry_queue_time = stages[j].time;
+            if (stages[j].stage == chain->timing.telemetry_present_stage)
+                telemetry_complete_time = stages[j].time;
         }
 
-        if (!chain->present.timing_relative && timings[i].targetTime)
+        if (present_time && !chain->present.timing_relative && timings[i].targetTime)
         {
             int64_t error_ns = present_time->time - timings[i].targetTime;
             if (chain->debug_latency)
@@ -4035,13 +4000,14 @@ static void dxgi_vk_swap_chain_poll_past_presentation(struct dxgi_vk_swap_chain 
                 FIXME_ONCE("Driver bug, targetTime reported is way early.\n");
         }
 
-        present_count = dxgi_vk_swap_chain_update_past_presentation(chain,
-                timings[i].presentId, present_time->time, timings[i].timeDomain, timings[i].timeDomainId,
-                props.timeDomainsCounter);
+        if (present_time)
+            dxgi_vk_swap_chain_update_past_presentation(chain,
+                    &entry, present_time->time, timings[i].timeDomain, timings[i].timeDomainId,
+                    props.timeDomainsCounter);
 
         if (telemetry_enabled)
         {
-            dxgi_vk_swap_chain_update_present_telemetry(chain, present_count,
+            dxgi_vk_swap_chain_update_present_telemetry(chain, &entry,
                     telemetry_queue_time, telemetry_complete_time,
                     timings[i].timeDomain, timings[i].timeDomainId, props.timeDomainsCounter);
         }
@@ -4278,21 +4244,6 @@ static void *dxgi_vk_swap_chain_wait_worker(void *chain_)
 
         if (chain->present.wait && !entry.present_timing_enabled)
             dxgi_vk_swap_chain_delay_next_frame(chain, end_frame_time_ns);
-
-        if (chain->present.timing && entry.timing_id)
-        {
-            if (chain->wait_thread.id_correlation_count == ARRAY_SIZE(chain->wait_thread.id_correlation))
-            {
-                /* Shouldn't really happen, but if it does for whatever reason, just nuke the list. */
-                FIXME("ID correlation list filled. Flushing ... Are present timing requests not properly returned by implementation?\n");
-                chain->wait_thread.id_correlation_count = 0;
-            }
-
-            chain->wait_thread.id_correlation[chain->wait_thread.id_correlation_count].present_count = entry.present_count;
-            chain->wait_thread.id_correlation[chain->wait_thread.id_correlation_count].present_id = entry.timing_id;
-            chain->wait_thread.id_correlation[chain->wait_thread.id_correlation_count].frame_statistics = entry.id != 0;
-            chain->wait_thread.id_correlation_count++;
-        }
 
         dxgi_vk_swap_chain_update_frame_statistics(chain, entry.present_count, entry.id);
 
