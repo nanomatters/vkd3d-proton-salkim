@@ -217,6 +217,7 @@ struct dxgi_vk_swap_chain
         uint64_t time_domain_ids[16];
         VkTimeDomainKHR time_domains[16];
         uint64_t calibration[16][2];
+        bool calibration_valid[16];
         uint32_t time_domains_count;
         uint64_t time_domain_update_count;
 
@@ -2204,6 +2205,7 @@ static void dxgi_vk_swap_chain_poll_time_domains(struct dxgi_vk_swap_chain *chai
     props.pTimeDomains = chain->timing.time_domains;
     props.pTimeDomainIds = chain->timing.time_domain_ids;
     chain->timing.time_domains_count = 0;
+    memset(chain->timing.calibration_valid, 0, sizeof(chain->timing.calibration_valid));
 
     if (VK_CALL(vkGetSwapchainTimeDomainPropertiesEXT(chain->queue->device->vk_device,
             chain->present.vk_swapchain, &props, &chain->timing.time_domain_update_count)) < 0)
@@ -2281,12 +2283,18 @@ static bool dxgi_vk_swap_chain_poll_single_calibration(struct dxgi_vk_swap_chain
 
 static void dxgi_vk_swap_chain_poll_calibration(struct dxgi_vk_swap_chain *chain)
 {
+    uint64_t calibration[2];
     unsigned int i;
 
     for (i = 0; i < chain->timing.time_domains_count; i++)
     {
-        if (!dxgi_vk_swap_chain_poll_single_calibration(chain, chain->timing.time_domains[i],
-                chain->timing.time_domain_ids[i], chain->timing.present_stage, chain->timing.calibration[i]))
+        if (dxgi_vk_swap_chain_poll_single_calibration(chain, chain->timing.time_domains[i],
+                chain->timing.time_domain_ids[i], chain->timing.present_stage, calibration))
+        {
+            memcpy(chain->timing.calibration[i], calibration, sizeof(calibration));
+            chain->timing.calibration_valid[i] = true;
+        }
+        else
         {
             FIXME("Failed to calibrate.\n");
         }
@@ -3870,6 +3878,10 @@ static void dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_chai
     {
         if (chain->timing.time_domain_ids[i] == time_domain_id && chain->timing.time_domains[i] == time_domain)
         {
+            /* A failed calibration after a domain change leaves no usable pair. */
+            if (!chain->timing.calibration_valid[i])
+                goto unlock;
+
             memcpy(calibration, &chain->timing.calibration[i], sizeof(calibration));
             break;
         }
