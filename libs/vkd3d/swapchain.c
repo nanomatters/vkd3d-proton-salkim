@@ -3832,7 +3832,8 @@ static void dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_chai
     unsigned int i;
     int64_t delta;
 
-    if (!entry->frame_statistics)
+    /* A zero timestamp means unavailable, not a usable pacing reference. */
+    if (!entry->frame_statistics || !time)
         return;
 
     /* With latest spec update, we're allowed to calibrate timestamps here.
@@ -3858,13 +3859,6 @@ static void dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_chai
     {
         if (chain->timing.time_domain_ids[i] == time_domain_id && chain->timing.time_domains[i] == time_domain)
         {
-            /* This can happen. */
-            if (time == 0)
-            {
-                FIXME_ONCE("Proper time is not returned for presentation time query.\n");
-                goto unlock;
-            }
-
             memcpy(calibration, &chain->timing.calibration[i], sizeof(calibration));
             break;
         }
@@ -3989,7 +3983,7 @@ static void dxgi_vk_swap_chain_poll_past_presentation(struct dxgi_vk_swap_chain 
                 telemetry_complete_time = stages[j].time;
         }
 
-        if (present_time && !chain->present.timing_relative && timings[i].targetTime)
+        if (present_time && present_time->time && !chain->present.timing_relative && timings[i].targetTime)
         {
             int64_t error_ns = present_time->time - timings[i].targetTime;
             if (chain->debug_latency)
