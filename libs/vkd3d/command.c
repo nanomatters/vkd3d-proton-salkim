@@ -26314,7 +26314,8 @@ static void *d3d12_command_queue_submission_worker_main(void *userdata)
 
             pthread_mutex_lock(&queue->queue_lock);
             queue->queue_drain_count++;
-            pthread_cond_signal(&queue->queue_cond);
+            /* Concurrent drain callers may be waiting for different counts. */
+            pthread_cond_broadcast(&queue->queue_cond);
             pthread_mutex_unlock(&queue->queue_lock);
             break;
 
