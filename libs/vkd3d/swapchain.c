@@ -2211,6 +2211,8 @@ static void dxgi_vk_swap_chain_poll_time_domains(struct dxgi_vk_swap_chain *chai
             chain->present.vk_swapchain, &props, &chain->timing.time_domain_update_count)) < 0)
     {
         WARN("Failed to query time domain properties for swapchain.\n");
+        /* Retry on the next present update instead of keeping an empty domain list. */
+        vkd3d_atomic_uint32_store_explicit(&chain->timing.need_properties_repoll_atomic, 1, vkd3d_memory_order_relaxed);
         return;
     }
 
