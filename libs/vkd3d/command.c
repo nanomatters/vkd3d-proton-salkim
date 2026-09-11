@@ -1889,7 +1889,15 @@ static HRESULT d3d12_shared_fence_set_native_sync_handle_on_completion_explicit(
             if (!fence->is_running)
             {
                 fence->is_running = true;
-                pthread_create(&fence->thread, NULL, vkd3d_shared_fence_worker_main, fence);
+                if (pthread_create(&fence->thread, NULL, vkd3d_shared_fence_worker_main, fence))
+                {
+                    fence->is_running = false;
+                    list_remove(&waiting_event->entry);
+                    pthread_mutex_unlock(&fence->mutex);
+                    vkd3d_free(waiting_event);
+                    ERR("Failed to start shared fence worker.\n");
+                    return E_OUTOFMEMORY;
+                }
             }
             else
             {
