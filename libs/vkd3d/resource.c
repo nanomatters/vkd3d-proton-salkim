@@ -6407,10 +6407,11 @@ static void vkd3d_create_buffer_srv_heap(vkd3d_cpu_descriptor_va_t desc_va,
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     struct vkd3d_descriptor_metadata_buffer_view view;
     VkTexelBufferDescriptorInfoEXT texel_buffer_info;
-    VkResourceDescriptorInfoEXT desc_info;
+    VkResourceDescriptorInfoEXT desc_infos[2], desc_info;
     struct d3d12_desc_split_embedded d;
     VkDeviceAddressRangeEXT ssbo_range;
-    VkHostAddressRangeEXT desc_range;
+    VkHostAddressRangeEXT desc_ranges[2], desc_range;
+    unsigned int descriptor_count = 0;
 
     if (!desc)
     {
@@ -6437,7 +6438,8 @@ static void vkd3d_create_buffer_srv_heap(vkd3d_cpu_descriptor_va_t desc_va,
 
         desc_range.address = stack_payload + device->bindless_state.packed_raw_buffer_offset;
         desc_range.size = device->device_info.descriptor_heap_properties.bufferDescriptorSize;
-        VK_CALL(vkWriteResourceDescriptorsEXT(device->vk_device, 1, &desc_info, &desc_range));
+        desc_infos[descriptor_count] = desc_info;
+        desc_ranges[descriptor_count++] = desc_range;
     }
     else
     {
@@ -6524,7 +6526,8 @@ static void vkd3d_create_buffer_srv_heap(vkd3d_cpu_descriptor_va_t desc_va,
 
             desc_range.address = stack_payload;
             desc_range.size = device->bindless_state.heap.uniform_texel_buffer_size;
-            VK_CALL(vkWriteResourceDescriptorsEXT(device->vk_device, 1, &desc_info, &desc_range));
+            desc_infos[descriptor_count] = desc_info;
+            desc_ranges[descriptor_count++] = desc_range;
         }
 
         if (emit_raw)
@@ -6543,10 +6546,12 @@ static void vkd3d_create_buffer_srv_heap(vkd3d_cpu_descriptor_va_t desc_va,
 
             desc_range.address = stack_payload + bindless->packed_raw_buffer_offset;
             desc_range.size = device->device_info.descriptor_heap_properties.bufferDescriptorSize;
-            VK_CALL(vkWriteResourceDescriptorsEXT(device->vk_device, 1, &desc_info, &desc_range));
+            desc_infos[descriptor_count] = desc_info;
+            desc_ranges[descriptor_count++] = desc_range;
         }
     }
 
+    VK_CALL(vkWriteResourceDescriptorsEXT(device->vk_device, descriptor_count, desc_infos, desc_ranges));
     memcpy(d.payload, stack_payload, bindless->cbv_srv_uav_size);
 }
 
@@ -7473,10 +7478,11 @@ static void vkd3d_create_buffer_uav_heap(vkd3d_cpu_descriptor_va_t desc_va, stru
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     struct vkd3d_descriptor_metadata_buffer_view view;
     VkTexelBufferDescriptorInfoEXT texel_buffer_info;
-    VkResourceDescriptorInfoEXT desc_info;
+    VkResourceDescriptorInfoEXT desc_infos[2], desc_info;
     struct d3d12_desc_split_embedded d;
     VkDeviceAddressRangeEXT ssbo_range;
-    VkHostAddressRangeEXT desc_range;
+    VkHostAddressRangeEXT desc_ranges[2], desc_range;
+    unsigned int descriptor_count = 0;
     bool can_emit_sibling_typed;
     bool can_emit_sibling_raw;
     bool is_byte_address;
@@ -7582,7 +7588,8 @@ static void vkd3d_create_buffer_uav_heap(vkd3d_cpu_descriptor_va_t desc_va, stru
 
         desc_range.address = stack_payload;
         desc_range.size = device->bindless_state.heap.storage_texel_buffer_size;
-        VK_CALL(vkWriteResourceDescriptorsEXT(device->vk_device, 1, &desc_info, &desc_range));
+        desc_infos[descriptor_count] = desc_info;
+        desc_ranges[descriptor_count++] = desc_range;
     }
 
     if (emit_raw)
@@ -7602,8 +7609,12 @@ static void vkd3d_create_buffer_uav_heap(vkd3d_cpu_descriptor_va_t desc_va, stru
 
         desc_range.address = stack_payload + bindless->packed_raw_buffer_offset;
         desc_range.size = device->device_info.descriptor_heap_properties.bufferDescriptorSize;
-        VK_CALL(vkWriteResourceDescriptorsEXT(device->vk_device, 1, &desc_info, &desc_range));
+        desc_infos[descriptor_count] = desc_info;
+        desc_ranges[descriptor_count++] = desc_range;
     }
+
+    /* Counter writes can reuse the typed descriptor payload and its create info. */
+    VK_CALL(vkWriteResourceDescriptorsEXT(device->vk_device, descriptor_count, desc_infos, desc_ranges));
 
     if (counter_resource && stride != 0)
     {
