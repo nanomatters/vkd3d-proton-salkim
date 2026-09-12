@@ -3208,6 +3208,13 @@ struct d3d12_rtas_batch_state
     size_t postbuild_infos_count;
 };
 
+enum vkd3d_descriptor_heap_dirty_flag
+{
+    VKD3D_DESCRIPTOR_HEAP_DIRTY_RESOURCE = 1 << 0,
+    VKD3D_DESCRIPTOR_HEAP_DIRTY_SAMPLER = 1 << 1,
+    VKD3D_DESCRIPTOR_HEAP_DIRTY_ALL = VKD3D_DESCRIPTOR_HEAP_DIRTY_RESOURCE | VKD3D_DESCRIPTOR_HEAP_DIRTY_SAMPLER,
+};
+
 union vkd3d_descriptor_heap_state
 {
     struct
@@ -3228,7 +3235,7 @@ union vkd3d_descriptor_heap_state
             VkDeviceSize reserved_offset;
         } resource, sampler;
 
-        bool global_heap_dirty;
+        unsigned int dirty_mask;
     } buffers;
 
     struct

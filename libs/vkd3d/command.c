@@ -2325,7 +2325,7 @@ static void d3d12_command_list_begin_new_sequence(struct d3d12_command_list *lis
 
     d3d12_command_list_invalidate_all_state(list);
     /* Extra special consideration since we're starting a fresh command buffer. */
-    list->descriptor_heap.buffers.global_heap_dirty = true;
+    list->descriptor_heap.buffers.dirty_mask = VKD3D_DESCRIPTOR_HEAP_DIRTY_ALL;
     d3d12_command_list_debug_mark_label(list, "Split", 0.0f, 0.0f, 0.0f, 1.0f);
 }
 
@@ -3377,7 +3377,7 @@ static uint32_t d3d12_command_list_allocate_meta_buffer_view(
 
     /* If heap is dirty, we've moved back to global heap, and it's meaningless to attempt to rebind the heap.
     * Just fallback to legacy descriptor model to avoid further disruptions. */
-    if (!heap || list->descriptor_heap.buffers.global_heap_dirty)
+    if (!heap || list->descriptor_heap.buffers.dirty_mask)
         return UINT32_MAX;
 
     heap_index = d3d12_command_allocator_allocate_meta_index(list->allocator, heap);
@@ -3418,7 +3418,7 @@ static uint32_t d3d12_command_list_allocate_meta_image_view(
 
     /* If heap is dirty, we've moved back to global heap, and it's meaningless to attempt to rebind the heap.
     * Just fallback to legacy descriptor model to avoid further disruptions. */
-    if (!heap || list->descriptor_heap.buffers.global_heap_dirty)
+    if (!heap || list->descriptor_heap.buffers.dirty_mask)
         return UINT32_MAX;
 
     assert(view_desc->image_usage == VK_IMAGE_USAGE_SAMPLED_BIT ||
@@ -5154,7 +5154,7 @@ void d3d12_command_list_meta_push_descriptor_index(struct d3d12_command_list *li
     push.offset = VKD3D_DESCRIPTOR_HEAP_META_PUSH_DATA_OFFSET + binding * sizeof(uint32_t);
 
     /* We don't go through meta heap path if the currently bound heap is invalid. */
-    assert(!list->descriptor_heap.buffers.global_heap_dirty);
+    assert(!list->descriptor_heap.buffers.dirty_mask);
 
     /* Don't bother invalidating root parameters, that's done in push_data
      * and we never do push_descriptor_index in complete isolation. */
@@ -6203,7 +6203,7 @@ void d3d12_command_list_invalidate_root_parameters(struct d3d12_command_list *li
 
 void d3d12_command_list_invalidate_descriptor_heap(struct d3d12_command_list *list)
 {
-    list->descriptor_heap.buffers.global_heap_dirty = true;
+    list->descriptor_heap.buffers.dirty_mask = VKD3D_DESCRIPTOR_HEAP_DIRTY_ALL;
     WARN("Invalidating descriptor heap due to meta command which is incompatible with heaps.\n");
 }
 
@@ -7032,14 +7032,14 @@ static void d3d12_command_list_init_default_descriptor_buffers(struct d3d12_comm
         /* By default, don't bind descriptor heap unless it's actually needed.
          * Drivers are able to inherit across command buffer boundary if they have a design
          * that cares about it. */
-        list->descriptor_heap.buffers.global_heap_dirty = false;
+        list->descriptor_heap.buffers.dirty_mask = 0;
     }
     else if (d3d12_device_uses_descriptor_buffers(list->device))
     {
         list->descriptor_heap.buffers.db.heap_va_resource = list->device->global_descriptor_buffer.resource.va;
         list->descriptor_heap.buffers.db.heap_va_sampler = list->device->global_descriptor_buffer.sampler.va;
         list->descriptor_heap.buffers.db.vk_buffer_resource = list->device->global_descriptor_buffer.resource.vk_buffer;
-        list->descriptor_heap.buffers.global_heap_dirty = true;
+        list->descriptor_heap.buffers.dirty_mask = VKD3D_DESCRIPTOR_HEAP_DIRTY_ALL;
     }
 }
 
@@ -7785,16 +7785,17 @@ void d3d12_command_list_update_global_descriptor_heap(struct d3d12_command_list 
     VkDescriptorBufferBindingInfoEXT global_buffers[2];
     VkBindHeapInfoEXT resource_heap_info;
 
-    /* global_heap_dirty is part of a union and only okay to touch if we use DB or heaps. */
+    /* dirty_mask is part of a union and only okay to touch if we use DB or heaps. */
 
     if (d3d12_device_use_descriptor_heap(list->device) &&
-            list->descriptor_heap.buffers.global_heap_dirty)
+            list->descriptor_heap.buffers.dirty_mask)
     {
         memset(&resource_heap_info, 0, sizeof(resource_heap_info));
         resource_heap_info.sType = VK_STRUCTURE_TYPE_BIND_HEAP_INFO_EXT;
 
         /* Do not bind dummy heap. */
-        if (list->descriptor_heap.buffers.resource.va)
+        if ((list->descriptor_heap.buffers.dirty_mask & VKD3D_DESCRIPTOR_HEAP_DIRTY_RESOURCE) &&
+                list->descriptor_heap.buffers.resource.va)
         {
             resource_heap_info.heapRange.address = list->descriptor_heap.buffers.resource.va;
             resource_heap_info.heapRange.size = list->descriptor_heap.buffers.resource.size;
@@ -7804,7 +7805,8 @@ void d3d12_command_list_update_global_descriptor_heap(struct d3d12_command_list 
             VK_CALL(vkCmdBindResourceHeapEXT(list->cmd.vk_command_buffer, &resource_heap_info));
         }
 
-        if (list->descriptor_heap.buffers.sampler.va)
+        if ((list->descriptor_heap.buffers.dirty_mask & VKD3D_DESCRIPTOR_HEAP_DIRTY_SAMPLER) &&
+                list->descriptor_heap.buffers.sampler.va)
         {
             resource_heap_info.heapRange.address = list->descriptor_heap.buffers.sampler.va;
             resource_heap_info.heapRange.size = list->descriptor_heap.buffers.sampler.size;
@@ -7814,10 +7816,10 @@ void d3d12_command_list_update_global_descriptor_heap(struct d3d12_command_list 
             VK_CALL(vkCmdBindSamplerHeapEXT(list->cmd.vk_command_buffer, &resource_heap_info));
         }
 
-        list->descriptor_heap.buffers.global_heap_dirty = false;
+        list->descriptor_heap.buffers.dirty_mask = 0;
     }
     else if (d3d12_device_uses_descriptor_buffers(list->device) &&
-            list->descriptor_heap.buffers.global_heap_dirty)
+            list->descriptor_heap.buffers.dirty_mask)
     {
         global_buffers[0].sType = VK_STRUCTURE_TYPE_DESCRIPTOR_BUFFER_BINDING_INFO_EXT;
         global_buffers[0].pNext = NULL;
@@ -7840,7 +7842,7 @@ void d3d12_command_list_update_global_descriptor_heap(struct d3d12_command_list 
         VK_CALL(vkCmdBindDescriptorBuffersEXT(list->cmd.vk_command_buffer,
                 ARRAY_SIZE(global_buffers), global_buffers));
 
-        list->descriptor_heap.buffers.global_heap_dirty = false;
+        list->descriptor_heap.buffers.dirty_mask = 0;
     }
 }
 
@@ -14315,8 +14317,12 @@ static void d3d12_command_list_set_descriptor_heaps(struct d3d12_command_list *l
             current_sampler_va == list->descriptor_heap.buffers.sampler.va)
         return;
 
+    if (current_resource_va != list->descriptor_heap.buffers.resource.va)
+        list->descriptor_heap.buffers.dirty_mask |= VKD3D_DESCRIPTOR_HEAP_DIRTY_RESOURCE;
+    if (current_sampler_va != list->descriptor_heap.buffers.sampler.va)
+        list->descriptor_heap.buffers.dirty_mask |= VKD3D_DESCRIPTOR_HEAP_DIRTY_SAMPLER;
+
     /* Immediately bind the heap. This allows e.g. metacommands to more aggressively use the heap as intended. */
-    list->descriptor_heap.buffers.global_heap_dirty = true;
     d3d12_command_list_update_global_descriptor_heap(list);
 }
 
@@ -14370,7 +14376,7 @@ static void d3d12_command_list_set_descriptor_heaps_buffers(struct d3d12_command
             current_sampler_va == list->descriptor_heap.buffers.db.heap_va_sampler)
         return;
 
-    list->descriptor_heap.buffers.global_heap_dirty = true;
+    list->descriptor_heap.buffers.dirty_mask = VKD3D_DESCRIPTOR_HEAP_DIRTY_ALL;
     /* Invalidation is a bit more aggressive for descriptor buffers.
      * We also need to invalidate any push descriptors. */
     d3d12_command_list_invalidate_root_parameters(list, &list->graphics_bindings, true, NULL);
