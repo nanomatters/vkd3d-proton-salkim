@@ -14279,9 +14279,11 @@ static void vkd3d_pipeline_bindings_set_dirty_sets(struct vkd3d_pipeline_binding
 static void d3d12_command_list_set_descriptor_heaps(struct d3d12_command_list *list,
         unsigned int heap_count, ID3D12DescriptorHeap *const *heaps)
 {
+    struct d3d12_descriptor_heap *current_resource_heap;
     VkDeviceAddress current_resource_va, current_sampler_va;
     unsigned int i;
 
+    current_resource_heap = list->descriptor_heap.buffers.resource.heap;
     current_resource_va = list->descriptor_heap.buffers.resource.va;
     current_sampler_va = list->descriptor_heap.buffers.sampler.va;
 
@@ -14302,9 +14304,12 @@ static void d3d12_command_list_set_descriptor_heaps(struct d3d12_command_list *l
             list->descriptor_heap.buffers.resource.reserved_offset = heap->descriptor_buffer.reserved_offset;
             list->descriptor_heap.buffers.resource.heap = heap;
 
-            /* We might need to push new redzone inline data for example. */
-            d3d12_command_list_invalidate_root_parameters(list, &list->graphics_bindings, false, NULL);
-            d3d12_command_list_invalidate_root_parameters(list, &list->compute_bindings, false, NULL);
+            if (current_resource_heap != heap)
+            {
+                /* We might need to push new redzone inline data for example. */
+                d3d12_command_list_invalidate_root_parameters(list, &list->graphics_bindings, false, NULL);
+                d3d12_command_list_invalidate_root_parameters(list, &list->compute_bindings, false, NULL);
+            }
         }
         else if (heap->desc.Type == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER)
         {
