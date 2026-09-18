@@ -69,8 +69,9 @@ typedef enum DXGI_VK_PRESENT_TELEMETRY_VALID
 
 /* Durations are nanoseconds. Each valid field contains its latest available
  * value. PresentId is the newest processed report, and CompletionStage
- * identifies the best available presentation stage used as PresentComplete.
- * DisplayIntervalNs is valid only for first pixel visible timestamps. */
+ * identifies the presentation stage used as PresentComplete, preferring first
+ * pixel out. DisplayIntervalNs measures consecutive first pixel out timestamps.
+ * Older implementations use first pixel visible. Check CompletionStage. */
 typedef struct DXGI_VK_PRESENT_TELEMETRY
 {
     UINT StructSize;
@@ -83,6 +84,13 @@ typedef struct DXGI_VK_PRESENT_TELEMETRY
     UINT CompletionStage;
     UINT Reserved;
 } DXGI_VK_PRESENT_TELEMETRY;
+
+/* One complete report, never merged with values from another present. */
+typedef struct DXGI_VK_PRESENT_TELEMETRY_FRAME
+{
+    DXGI_VK_PRESENT_TELEMETRY Data;
+    UINT64 PresentTimeNs;
+} DXGI_VK_PRESENT_TELEMETRY_FRAME;
 
 [
     object,
@@ -203,6 +211,22 @@ interface IDXGIVkSwapChainPresentTelemetry : IUnknown
 
     HRESULT GetData(
         DXGI_VK_PRESENT_TELEMETRY *pData);
+}
+
+[
+    object,
+    local,
+    uuid(77b7d6c1-49c8-49e1-a5ea-96c90efb042a)
+]
+interface IDXGIVkSwapChainPresentTelemetry1 : IDXGIVkSwapChainPresentTelemetry
+{
+    /* Drains up to *pCount reports without waiting. NowNs and PresentTimeNs
+     * share a host clock. Generation changes when the timing history resets. */
+    HRESULT GetFrameData(
+        UINT *pCount,
+        DXGI_VK_PRESENT_TELEMETRY_FRAME *pFrames,
+        UINT64 *pNowNs,
+        UINT64 *pGeneration);
 }
 
 [
