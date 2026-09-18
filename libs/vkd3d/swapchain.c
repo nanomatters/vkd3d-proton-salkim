@@ -179,10 +179,20 @@ struct platform_sleep_state
     uint64_t sleep_threshold_ns;
 };
 
+struct present_timing_calibration
+{
+    VkTimeDomainKHR time_domain;
+    uint64_t time_domain_id;
+    /* One paired snapshot: host, pacing, queue end, telemetry completion. */
+    uint64_t timestamps[4];
+    /* Remember failed attempts too, so reports do not retry every frame. */
+    bool telemetry;
+};
+
 struct dxgi_vk_swap_chain
 {
     IDXGIVkSwapChainHud IDXGIVkSwapChain_iface;
-    IDXGIVkSwapChainPresentTelemetry IDXGIVkSwapChainPresentTelemetry_iface;
+    IDXGIVkSwapChainPresentTelemetry1 IDXGIVkSwapChainPresentTelemetry_iface;
     struct d3d12_command_queue *queue;
 
     LONG refcount;
@@ -216,8 +226,8 @@ struct dxgi_vk_swap_chain
          * at one time, just ignore the extra ones, as that is getting rather ridiculous. */
         uint64_t time_domain_ids[16];
         VkTimeDomainKHR time_domains[16];
-        uint64_t calibration[16][2];
-        bool calibration_valid[16];
+        struct present_timing_calibration calibration[16];
+        uint32_t calibration_count;
         uint32_t time_domains_count;
         uint64_t time_domain_update_count;
 
@@ -362,6 +372,9 @@ struct dxgi_vk_swap_chain
         spinlock_t lock;
         DXGI_VK_PRESENT_TELEMETRY data;
         uint64_t field_present_count[4];
+        DXGI_VK_PRESENT_TELEMETRY_FRAME frames[128];
+        unsigned int head, count;
+        uint64_t generation;
 
         /* A slot remains occupied until its complete driver report is consumed. */
         struct present_timing_entry pending[DXGI_PRESENT_TIMING_QUEUE_SIZE];
@@ -665,7 +678,7 @@ static inline struct dxgi_vk_swap_chain *impl_from_IDXGIVkSwapChain(IDXGIVkSwapC
 }
 
 static inline struct dxgi_vk_swap_chain *impl_from_IDXGIVkSwapChainPresentTelemetry(
-        IDXGIVkSwapChainPresentTelemetry *iface)
+        IDXGIVkSwapChainPresentTelemetry1 *iface)
 {
     return CONTAINING_RECORD(iface, struct dxgi_vk_swap_chain, IDXGIVkSwapChainPresentTelemetry_iface);
 }
@@ -714,7 +727,8 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_QueryInterface(IDXGIVkSwapCh
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     TRACE("iface %p\n", iface);
-    if (IsEqualGUID(riid, &IID_IDXGIVkSwapChainPresentTelemetry))
+    if (IsEqualGUID(riid, &IID_IDXGIVkSwapChainPresentTelemetry) ||
+            IsEqualGUID(riid, &IID_IDXGIVkSwapChainPresentTelemetry1))
     {
         dxgi_vk_swap_chain_AddRef(&chain->IDXGIVkSwapChain_iface);
         *object = &chain->IDXGIVkSwapChainPresentTelemetry_iface;
@@ -737,28 +751,28 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_QueryInterface(IDXGIVkSwapCh
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_present_telemetry_QueryInterface(
-        IDXGIVkSwapChainPresentTelemetry *iface, REFIID riid, void **object)
+        IDXGIVkSwapChainPresentTelemetry1 *iface, REFIID riid, void **object)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChainPresentTelemetry(iface);
     return dxgi_vk_swap_chain_QueryInterface(&chain->IDXGIVkSwapChain_iface, riid, object);
 }
 
 static ULONG STDMETHODCALLTYPE dxgi_vk_swap_chain_present_telemetry_AddRef(
-        IDXGIVkSwapChainPresentTelemetry *iface)
+        IDXGIVkSwapChainPresentTelemetry1 *iface)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChainPresentTelemetry(iface);
     return dxgi_vk_swap_chain_AddRef(&chain->IDXGIVkSwapChain_iface);
 }
 
 static ULONG STDMETHODCALLTYPE dxgi_vk_swap_chain_present_telemetry_Release(
-        IDXGIVkSwapChainPresentTelemetry *iface)
+        IDXGIVkSwapChainPresentTelemetry1 *iface)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChainPresentTelemetry(iface);
     return dxgi_vk_swap_chain_Release(&chain->IDXGIVkSwapChain_iface);
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_present_telemetry_SetEnabled(
-        IDXGIVkSwapChainPresentTelemetry *iface, BOOL enable)
+        IDXGIVkSwapChainPresentTelemetry1 *iface, BOOL enable)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChainPresentTelemetry(iface);
 
@@ -774,6 +788,8 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_present_telemetry_SetEnabled
                 sizeof(chain->present_telemetry.field_present_count));
         chain->present_telemetry.previous_present_count = 0;
         chain->present_telemetry.previous_present_complete_ns = 0;
+        chain->present_telemetry.head = chain->present_telemetry.count = 0;
+        chain->present_telemetry.generation++;
         spinlock_release(&chain->present_telemetry.lock);
     }
 
@@ -781,7 +797,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_present_telemetry_SetEnabled
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_present_telemetry_GetData(
-        IDXGIVkSwapChainPresentTelemetry *iface, DXGI_VK_PRESENT_TELEMETRY *data)
+        IDXGIVkSwapChainPresentTelemetry1 *iface, DXGI_VK_PRESENT_TELEMETRY *data)
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChainPresentTelemetry(iface);
 
@@ -794,6 +810,30 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_present_telemetry_GetData(
 
     data->StructSize = sizeof(*data);
     return data->ValidFields ? S_OK : S_FALSE;
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_present_telemetry_GetFrameData(
+        IDXGIVkSwapChainPresentTelemetry1 *iface, UINT *count,
+        DXGI_VK_PRESENT_TELEMETRY_FRAME *frames, UINT64 *now_ns, UINT64 *generation)
+{
+    struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChainPresentTelemetry(iface);
+    unsigned int i;
+
+    if (!count || (*count && !frames) || !now_ns || !generation)
+        return E_INVALIDARG;
+
+    spinlock_acquire(&chain->present_telemetry.lock);
+    *count = min(*count, chain->present_telemetry.count);
+    for (i = 0; i < *count; i++)
+        frames[i] = chain->present_telemetry.frames[(chain->present_telemetry.head + i)
+                % ARRAY_SIZE(chain->present_telemetry.frames)];
+    chain->present_telemetry.head = (chain->present_telemetry.head + *count)
+            % ARRAY_SIZE(chain->present_telemetry.frames);
+    chain->present_telemetry.count -= *count;
+    *generation = chain->present_telemetry.generation;
+    *now_ns = vkd3d_get_current_time_ns();
+    spinlock_release(&chain->present_telemetry.lock);
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetDesc(IDXGIVkSwapChainHud *iface, DXGI_SWAP_CHAIN_DESC1 *pDesc)
@@ -1598,13 +1638,14 @@ static CONST_VTBL struct IDXGIVkSwapChainHudVtbl dxgi_vk_swap_chain_vtbl =
     dxgi_vk_swap_chain_SetHudData,
 };
 
-static CONST_VTBL struct IDXGIVkSwapChainPresentTelemetryVtbl dxgi_vk_swap_chain_present_telemetry_vtbl =
+static CONST_VTBL struct IDXGIVkSwapChainPresentTelemetry1Vtbl dxgi_vk_swap_chain_present_telemetry_vtbl =
 {
     dxgi_vk_swap_chain_present_telemetry_QueryInterface,
     dxgi_vk_swap_chain_present_telemetry_AddRef,
     dxgi_vk_swap_chain_present_telemetry_Release,
     dxgi_vk_swap_chain_present_telemetry_SetEnabled,
     dxgi_vk_swap_chain_present_telemetry_GetData,
+    dxgi_vk_swap_chain_present_telemetry_GetFrameData,
 };
 
 static bool dxgi_vk_swap_chain_update_formats_locked(struct dxgi_vk_swap_chain *chain, bool force_requery)
@@ -1731,10 +1772,11 @@ static void dxgi_vk_swap_chain_update_wait_timing_capabilities(struct dxgi_vk_sw
     else if (present_timing_caps.presentStageQueries & VK_PRESENT_STAGE_REQUEST_DEQUEUED_BIT_EXT)
         chain->timing.present_stage = VK_PRESENT_STAGE_REQUEST_DEQUEUED_BIT_EXT;
 
-    if (present_timing_caps.presentStageQueries & VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_VISIBLE_BIT_EXT)
-        chain->timing.telemetry_present_stage = VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_VISIBLE_BIT_EXT;
-    else if (present_timing_caps.presentStageQueries & VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT)
+    /* Prefer output timing, excluding the display's internal processing delay. */
+    if (present_timing_caps.presentStageQueries & VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT)
         chain->timing.telemetry_present_stage = VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT;
+    else if (present_timing_caps.presentStageQueries & VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_VISIBLE_BIT_EXT)
+        chain->timing.telemetry_present_stage = VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_VISIBLE_BIT_EXT;
     else if (present_timing_caps.presentStageQueries & VK_PRESENT_STAGE_REQUEST_DEQUEUED_BIT_EXT)
         chain->timing.telemetry_present_stage = VK_PRESENT_STAGE_REQUEST_DEQUEUED_BIT_EXT;
 }
@@ -1935,6 +1977,8 @@ static void dxgi_vk_swap_chain_destroy_swapchain_in_present_task(struct dxgi_vk_
     memset(chain->present_telemetry.field_present_count, 0,
             sizeof(chain->present_telemetry.field_present_count));
     memset(chain->present_telemetry.pending, 0, sizeof(chain->present_telemetry.pending));
+    chain->present_telemetry.head = chain->present_telemetry.count = 0;
+    chain->present_telemetry.generation++;
     chain->present_telemetry.previous_present_count = 0;
     chain->present_telemetry.previous_present_complete_ns = 0;
     spinlock_release(&chain->present_telemetry.lock);
@@ -2205,7 +2249,8 @@ static void dxgi_vk_swap_chain_poll_time_domains(struct dxgi_vk_swap_chain *chai
     props.pTimeDomains = chain->timing.time_domains;
     props.pTimeDomainIds = chain->timing.time_domain_ids;
     chain->timing.time_domains_count = 0;
-    memset(chain->timing.calibration_valid, 0, sizeof(chain->timing.calibration_valid));
+    /* Domain IDs and stage clocks belong to this swapchain and domain generation. */
+    chain->timing.calibration_count = 0;
 
     if (VK_CALL(vkGetSwapchainTimeDomainPropertiesEXT(chain->queue->device->vk_device,
             chain->present.vk_swapchain, &props, &chain->timing.time_domain_update_count)) < 0)
@@ -2229,44 +2274,70 @@ static void dxgi_vk_swap_chain_poll_time_domains(struct dxgi_vk_swap_chain *chai
     }
 }
 
+static VkTimeDomainKHR dxgi_vk_swap_chain_host_time_domain(void)
+{
+#ifdef _WIN32
+    return VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR;
+#else
+    return VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR;
+#endif
+}
+
 static bool dxgi_vk_swap_chain_poll_single_calibration(struct dxgi_vk_swap_chain *chain,
-        VkTimeDomainEXT time_domain, uint64_t time_domain_id, VkPresentStageFlagsEXT present_stage,
-        uint64_t *calibration)
+        struct present_timing_calibration *calibration, bool telemetry)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
-    VkSwapchainCalibratedTimestampInfoEXT swapchain_info;
-    VkCalibratedTimestampInfoKHR infos[2];
+    VkSwapchainCalibratedTimestampInfoEXT swapchain_infos[3];
+    VkCalibratedTimestampInfoKHR infos[4];
+    VkPresentStageFlagsEXT stages[3];
+    uint32_t indices[3], count = 1;
+    uint64_t timestamps[4];
     uint64_t max_deviation = 0;
-    unsigned int i;
+    unsigned int i, j;
 
-#ifdef _WIN32
-    const VkTimeDomainKHR domain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR;
-#else
-    const VkTimeDomainKHR domain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR;
-#endif
+    calibration->telemetry = telemetry;
+    stages[0] = chain->timing.present_stage;
+    stages[1] = VK_PRESENT_STAGE_QUEUE_OPERATIONS_END_BIT_EXT;
+    stages[2] = chain->timing.telemetry_present_stage;
 
     memset(infos, 0, sizeof(infos));
+    memset(swapchain_infos, 0, sizeof(swapchain_infos));
     infos[0].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
-    infos[0].timeDomain = domain;
+    infos[0].timeDomain = dxgi_vk_swap_chain_host_time_domain();
 
-    infos[1].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
-    infos[1].timeDomain = time_domain;
-
-    if (infos[1].timeDomain == VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT ||
-            infos[1].timeDomain == VK_TIME_DOMAIN_SWAPCHAIN_LOCAL_EXT)
+    for (i = 0; i < (telemetry ? 3u : 1u); i++)
     {
-        memset(&swapchain_info, 0, sizeof(swapchain_info));
-        swapchain_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT;
-        swapchain_info.swapchain = chain->present.vk_swapchain;
-        swapchain_info.timeDomainId = time_domain_id;
-        swapchain_info.presentStage = present_stage;
-        infos[1].pNext = &swapchain_info;
+        /* Non-stage-local domains have one clock. Pacing and telemetry may
+         * also use the same stage, in which case they must share its sample. */
+        for (j = 0; j < i; j++)
+            if (calibration->time_domain != VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT || stages[i] == stages[j])
+                break;
+        if (j < i)
+        {
+            indices[i] = indices[j];
+            continue;
+        }
+
+        indices[i] = count;
+        infos[count].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
+        infos[count].timeDomain = calibration->time_domain;
+        if (calibration->time_domain == VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT ||
+                calibration->time_domain == VK_TIME_DOMAIN_SWAPCHAIN_LOCAL_EXT)
+        {
+            swapchain_infos[i].sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT;
+            swapchain_infos[i].swapchain = chain->present.vk_swapchain;
+            swapchain_infos[i].timeDomainId = calibration->time_domain_id;
+            if (calibration->time_domain == VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT)
+                swapchain_infos[i].presentStage = stages[i];
+            infos[count].pNext = &swapchain_infos[i];
+        }
+        count++;
     }
 
     for (i = 0; i < 10; i++)
     {
-        if (VK_CALL(vkGetCalibratedTimestampsKHR(chain->queue->device->vk_device, 2, infos,
-            calibration, &max_deviation)) != VK_SUCCESS)
+        if (VK_CALL(vkGetCalibratedTimestampsKHR(chain->queue->device->vk_device, count, infos,
+            timestamps, &max_deviation)) != VK_SUCCESS)
             return false;
 
         /* Spin until we get a sufficiently accurate estimate just in case something freaky happens. */
@@ -2280,27 +2351,58 @@ static bool dxgi_vk_swap_chain_poll_single_calibration(struct dxgi_vk_swap_chain
     TRACE("Recalibrated with max deviation %"PRIu64" ns after %u iterations.\n",
         max_deviation, i);
 
+    calibration->timestamps[0] = timestamps[0];
+    calibration->timestamps[1] = timestamps[indices[0]];
+    calibration->timestamps[2] = telemetry ? timestamps[indices[1]] : 0;
+    calibration->timestamps[3] = telemetry ? timestamps[indices[2]] : 0;
     return true;
+}
+
+/* Caller holds timing.lock, or has drained the wait thread for recreation. */
+static void dxgi_vk_swap_chain_get_calibration(struct dxgi_vk_swap_chain *chain,
+        VkTimeDomainKHR time_domain, uint64_t time_domain_id, uint64_t *timestamps)
+{
+    struct present_timing_calibration fallback, *calibration;
+    bool telemetry = vkd3d_atomic_uint32_load_explicit(&chain->present_telemetry.enabled,
+            vkd3d_memory_order_acquire);
+    unsigned int i;
+
+    for (i = 0; i < chain->timing.calibration_count; i++)
+    {
+        calibration = &chain->timing.calibration[i];
+        if (calibration->time_domain == time_domain && calibration->time_domain_id == time_domain_id)
+        {
+            if (telemetry && !calibration->telemetry)
+                dxgi_vk_swap_chain_poll_single_calibration(chain, calibration, true);
+            memcpy(timestamps, calibration->timestamps, sizeof(calibration->timestamps));
+            return;
+        }
+    }
+
+    /* Keep the old uncached fallback if a driver exceeds our domain limit. */
+    calibration = chain->timing.calibration_count < ARRAY_SIZE(chain->timing.calibration) ?
+            &chain->timing.calibration[chain->timing.calibration_count++] : &fallback;
+    memset(calibration, 0, sizeof(*calibration));
+    calibration->time_domain = time_domain;
+    calibration->time_domain_id = time_domain_id;
+    dxgi_vk_swap_chain_poll_single_calibration(chain, calibration, telemetry);
+    memcpy(timestamps, calibration->timestamps, sizeof(calibration->timestamps));
 }
 
 static void dxgi_vk_swap_chain_poll_calibration(struct dxgi_vk_swap_chain *chain)
 {
-    uint64_t calibration[2];
+    bool telemetry = vkd3d_atomic_uint32_load_explicit(&chain->present_telemetry.enabled,
+            vkd3d_memory_order_acquire);
+    uint64_t timestamps[4];
     unsigned int i;
 
+    /* Refresh known domains, including those first seen in a timing report. */
+    for (i = 0; i < chain->timing.calibration_count; i++)
+        dxgi_vk_swap_chain_poll_single_calibration(chain, &chain->timing.calibration[i], telemetry);
+
     for (i = 0; i < chain->timing.time_domains_count; i++)
-    {
-        if (dxgi_vk_swap_chain_poll_single_calibration(chain, chain->timing.time_domains[i],
-                chain->timing.time_domain_ids[i], chain->timing.present_stage, calibration))
-        {
-            memcpy(chain->timing.calibration[i], calibration, sizeof(calibration));
-            chain->timing.calibration_valid[i] = true;
-        }
-        else
-        {
-            FIXME("Failed to calibrate.\n");
-        }
-    }
+        dxgi_vk_swap_chain_get_calibration(chain, chain->timing.time_domains[i],
+                chain->timing.time_domain_ids[i], timestamps);
 }
 
 static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk_swap_chain *chain)
@@ -3645,22 +3747,12 @@ static bool dxgi_vk_swap_chain_calibrate_present_telemetry(struct dxgi_vk_swap_c
         uint64_t queue_time, uint64_t complete_time,
         uint64_t *queue_time_ns, uint64_t *complete_time_ns)
 {
-    const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
-    VkSwapchainCalibratedTimestampInfoEXT swapchain_infos[2];
-    VkCalibratedTimestampInfoKHR infos[3];
-    uint64_t timestamps[3];
-    uint64_t max_deviation;
-    VkTimeDomainKHR host_domain;
-    uint32_t count;
-    VkResult vr;
+    uint64_t timestamps[4];
 
-#ifdef _WIN32
-    host_domain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR;
-#else
-    host_domain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR;
-#endif
+    if (!queue_time && !complete_time)
+        return true;
 
-    if (time_domain == host_domain)
+    if (time_domain == dxgi_vk_swap_chain_host_time_domain())
     {
         if (queue_time)
             *queue_time_ns = dxgi_vk_swap_chain_host_counter_to_ns(queue_time);
@@ -3669,55 +3761,18 @@ static bool dxgi_vk_swap_chain_calibrate_present_telemetry(struct dxgi_vk_swap_c
         return true;
     }
 
-    memset(infos, 0, sizeof(infos));
-    memset(swapchain_infos, 0, sizeof(swapchain_infos));
-    memset(timestamps, 0, sizeof(timestamps));
-
-    count = time_domain == VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT ? 3 : 2;
-    infos[0].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
-    infos[0].timeDomain = host_domain;
-    infos[1].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
-    infos[1].timeDomain = time_domain;
-
-    if (time_domain == VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT)
-    {
-        infos[2].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
-        infos[2].timeDomain = time_domain;
-
-        swapchain_infos[0].sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT;
-        swapchain_infos[0].swapchain = chain->present.vk_swapchain;
-        swapchain_infos[0].presentStage = VK_PRESENT_STAGE_QUEUE_OPERATIONS_END_BIT_EXT;
-        swapchain_infos[0].timeDomainId = time_domain_id;
-        infos[1].pNext = &swapchain_infos[0];
-
-        swapchain_infos[1].sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT;
-        swapchain_infos[1].swapchain = chain->present.vk_swapchain;
-        swapchain_infos[1].presentStage = chain->timing.telemetry_present_stage;
-        swapchain_infos[1].timeDomainId = time_domain_id;
-        infos[2].pNext = &swapchain_infos[1];
-    }
-    else if (time_domain == VK_TIME_DOMAIN_SWAPCHAIN_LOCAL_EXT)
-    {
-        swapchain_infos[0].sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT;
-        swapchain_infos[0].swapchain = chain->present.vk_swapchain;
-        swapchain_infos[0].timeDomainId = time_domain_id;
-        infos[1].pNext = &swapchain_infos[0];
-    }
-
-    max_deviation = 0;
-    vr = VK_CALL(vkGetCalibratedTimestampsKHR(chain->queue->device->vk_device,
-            count, infos, timestamps, &max_deviation));
-    if (vr != VK_SUCCESS || !timestamps[0] || !timestamps[1] || (count == 3 && !timestamps[2]))
+    dxgi_vk_swap_chain_get_calibration(chain, time_domain, time_domain_id, timestamps);
+    if (!timestamps[0] || (queue_time && !timestamps[2]) || (complete_time && !timestamps[3]))
         return false;
 
     timestamps[0] = dxgi_vk_swap_chain_host_counter_to_ns(timestamps[0]);
 
     if (queue_time && !dxgi_vk_swap_chain_apply_telemetry_calibration(
-            timestamps[0], timestamps[1], queue_time, queue_time_ns))
+            timestamps[0], timestamps[2], queue_time, queue_time_ns))
         return false;
 
     return !complete_time || dxgi_vk_swap_chain_apply_telemetry_calibration(timestamps[0],
-            count == 3 ? timestamps[2] : timestamps[1], complete_time, complete_time_ns);
+            timestamps[3], complete_time, complete_time_ns);
 }
 
 static void dxgi_vk_swap_chain_update_present_telemetry(struct dxgi_vk_swap_chain *chain,
@@ -3741,8 +3796,8 @@ static void dxgi_vk_swap_chain_update_present_telemetry(struct dxgi_vk_swap_chai
             !dxgi_vk_swap_chain_calibrate_present_telemetry(chain, time_domain, time_domain_id,
                     queue_time, complete_time, &queue_time_ns, &complete_time_ns))
     {
-        pthread_mutex_unlock(&chain->timing.lock);
-        return;
+        /* Preserve a missing-data report for the graphs, not a stale value. */
+        queue_time_ns = complete_time_ns = 0;
     }
 
     pthread_mutex_unlock(&chain->timing.lock);
@@ -3779,9 +3834,9 @@ static void dxgi_vk_swap_chain_update_present_telemetry(struct dxgi_vk_swap_chai
         data.DisplayDurationNs = complete_time_ns - queue_time_ns;
     }
 
-    /* This measured visible-to-visible interval naturally reflects VRR cadence. */
+    /* Measure output cadence, not queue removal or the display's response time. */
     if (chain->timing.telemetry_present_stage ==
-            VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_VISIBLE_BIT_EXT &&
+            VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT &&
             complete_time_ns && present_count > chain->present_telemetry.previous_present_count)
     {
         if (present_count == chain->present_telemetry.previous_present_count + 1 &&
@@ -3796,6 +3851,18 @@ static void dxgi_vk_swap_chain_update_present_telemetry(struct dxgi_vk_swap_chai
         chain->present_telemetry.previous_present_count = present_count;
         chain->present_telemetry.previous_present_complete_ns = complete_time_ns;
     }
+
+    /* Keep complete reports separate from the latest-value text snapshot.
+     * Overflow drops the oldest report without delaying presentation. */
+    if (chain->present_telemetry.count == ARRAY_SIZE(chain->present_telemetry.frames))
+    {
+        chain->present_telemetry.head = (chain->present_telemetry.head + 1)
+                % ARRAY_SIZE(chain->present_telemetry.frames);
+        chain->present_telemetry.count--;
+    }
+    chain->present_telemetry.frames[(chain->present_telemetry.head + chain->present_telemetry.count)
+            % ARRAY_SIZE(chain->present_telemetry.frames)] = (DXGI_VK_PRESENT_TELEMETRY_FRAME){data, present_time_ns};
+    chain->present_telemetry.count++;
 
     if (data.ValidFields)
     {
@@ -3848,17 +3915,15 @@ static void dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_chai
         uint64_t time_domain_counter)
 {
     uint64_t present_count = entry->present_count;
-    uint64_t calibration[2];
-    bool valid_time_domain;
-    unsigned int i;
+    uint64_t calibration[4];
     int64_t delta;
 
     /* A zero timestamp means unavailable, not a usable pacing reference. */
     if (!entry->frame_statistics || !time)
         return;
 
-    /* With latest spec update, we're allowed to calibrate timestamps here.
-     * Only recalibrate timestamps as an emergency if we don't know about a spurious new domain ID. */
+    /* The spec permits calibration here. Reuse the submission thread's snapshot,
+     * extending it only for a new domain or newly enabled telemetry. */
     pthread_mutex_lock(&chain->timing.lock);
 
     if (present_count > chain->timing.feedback.present_count)
@@ -3872,44 +3937,30 @@ static void dxgi_vk_swap_chain_update_past_presentation(struct dxgi_vk_swap_chai
         chain->timing.feedback.present_time_domain_id = time_domain_id;
     }
 
-    valid_time_domain = time_domain_counter == chain->timing.time_domain_update_count;
-    if (!valid_time_domain)
+    if (time_domain_counter != chain->timing.time_domain_update_count)
+    {
         FIXME_ONCE("Time domain for feedback is not valid, cannot get accurate timestamp.\n");
-
-    for (i = 0; i < chain->timing.time_domains_count; i++)
-    {
-        if (chain->timing.time_domain_ids[i] == time_domain_id && chain->timing.time_domains[i] == time_domain)
-        {
-            /* A failed calibration after a domain change leaves no usable pair. */
-            if (!chain->timing.calibration_valid[i])
-                goto unlock;
-
-            memcpy(calibration, &chain->timing.calibration[i], sizeof(calibration));
-            break;
-        }
+        goto unlock;
     }
 
-    if (i == chain->timing.time_domains_count)
+    if (time_domain != dxgi_vk_swap_chain_host_time_domain())
     {
-        if (!dxgi_vk_swap_chain_poll_single_calibration(chain, time_domain, time_domain_id,
-                chain->timing.present_stage, calibration))
-        {
-            FIXME_ONCE("Failed fallback calibration.\n");
+        dxgi_vk_swap_chain_get_calibration(chain, time_domain, time_domain_id, calibration);
+        if (!calibration[0] || !calibration[1])
             goto unlock;
-        }
-    }
 
-    delta = (int64_t)time - (int64_t)calibration[1];
+        delta = (int64_t)time - (int64_t)calibration[1];
 
 #ifdef _WIN32
-    {
-        LARGE_INTEGER li;
-        QueryPerformanceFrequency(&li);
-        delta = (int64_t)((double)delta * ((double)li.QuadPart / 1e9));
-    }
+        {
+            LARGE_INTEGER li;
+            QueryPerformanceFrequency(&li);
+            delta = (int64_t)((double)delta * ((double)li.QuadPart / 1e9));
+        }
 #endif
 
-    time = calibration[0] + delta;
+        time = calibration[0] + delta;
+    }
 
     if (present_count > chain->frame_statistics.count)
     {
