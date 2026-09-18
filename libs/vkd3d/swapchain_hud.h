@@ -21,7 +21,7 @@
 
 #include "vkd3d_private.h"
 
-#define VKD3D_SWAPCHAIN_HUD_MAX_VERTICES 8192
+#define VKD3D_SWAPCHAIN_HUD_MAX_VERTICES 16384
 
 struct vkd3d_swapchain_hud_buffer
 {
