@@ -3763,7 +3763,7 @@ struct d3d12_command_queue_submission_signal
 struct d3d12_command_queue_submission_execute
 {
     VkCommandBufferSubmitInfo *cmd;
-    uint32_t *cmd_cost;
+    uint32_t *cmd_cost; /* Stored after cmd in the same allocation. */
     struct d3d12_command_allocator **command_allocators;
     UINT cmd_count;
     UINT num_command_allocators;

@@ -23803,22 +23803,18 @@ VKD3D_METHODENTRY(void) d3d12_command_queue_ExecuteCommandLists(ID3D12CommandQue
             num_command_buffers++;
     }
 
-    if (!(buffers = vkd3d_calloc(num_command_buffers, sizeof(*buffers))))
+    /* The command buffer and cost arrays share the submission lifetime. */
+    if (!(buffers = vkd3d_calloc(num_command_buffers, sizeof(*buffers) + sizeof(*cmd_cost))))
     {
-        ERR("Failed to allocate command buffer array.\n");
+        ERR("Failed to allocate command buffer arrays.\n");
         return;
     }
+    cmd_cost = (uint32_t *)(buffers + num_command_buffers);
 
     if (!(allocators = vkd3d_calloc(command_list_count, sizeof(*allocators))))
     {
         ERR("Failed to allocate outstanding submissions count.\n");
         vkd3d_free(buffers);
-        return;
-    }
-
-    if (!(cmd_cost = vkd3d_calloc(num_command_buffers, sizeof(*cmd_cost))))
-    {
-        ERR("Failed to allocate command buffer cost array.\n");
         return;
     }
 
@@ -23898,7 +23894,6 @@ VKD3D_METHODENTRY(void) d3d12_command_queue_ExecuteCommandLists(ID3D12CommandQue
 
             vkd3d_free(allocators);
             vkd3d_free(buffers);
-            vkd3d_free(cmd_cost);
 #ifdef VKD3D_ENABLE_BREADCRUMBS
             vkd3d_free(breadcrumb_indices);
 #endif
@@ -26290,7 +26285,6 @@ static void *d3d12_command_queue_submission_worker_main(void *userdata)
              * The atomic counters are decremented when the submission is observed to be freed.
              * On error, the counters are freed early, so there is no risk of leak. */
             vkd3d_free(submission.execute.cmd);
-            vkd3d_free(submission.execute.cmd_cost);
             vkd3d_free(submission.execute.transitions);
 #ifdef VKD3D_ENABLE_BREADCRUMBS
             for (i = 0; i < submission.execute.breadcrumb_indices_count; i++)
