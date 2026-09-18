@@ -3888,6 +3888,7 @@ struct d3d12_command_queue
     struct d3d12_command_queue_submission *submissions;
     size_t submissions_count;
     size_t submissions_size;
+    size_t submissions_head;
     uint64_t drain_count;
     uint64_t queue_drain_count;
 
