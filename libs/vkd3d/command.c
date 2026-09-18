@@ -26118,10 +26118,36 @@ void d3d12_command_queue_enqueue_callback(struct d3d12_command_queue *queue, voi
 void d3d12_command_queue_add_submission_locked(struct d3d12_command_queue *queue,
                                                const struct d3d12_command_queue_submission *sub)
 {
+    size_t old_size, tail_count, index;
+
     vkd3d_atomic_uint32_increment(&queue->inflight_submissions, vkd3d_memory_order_relaxed);
-    vkd3d_array_reserve((void**)&queue->submissions, &queue->submissions_size,
-                        queue->submissions_count + 1, sizeof(*queue->submissions));
-    queue->submissions[queue->submissions_count++] = *sub;
+    if (queue->submissions_count == queue->submissions_size)
+    {
+        old_size = queue->submissions_size;
+        if (!vkd3d_array_reserve((void **)&queue->submissions, &queue->submissions_size,
+                queue->submissions_count + 1, sizeof(*queue->submissions)))
+        {
+            /* Dropping a submission would leave its waiters blocked indefinitely. */
+            ERR("Failed to grow submission queue.\n");
+            abort();
+        }
+
+        /* Keep the wrapped prefix in place and move the tail to the new end. */
+        if (queue->submissions_head)
+        {
+            tail_count = old_size - queue->submissions_head;
+            index = queue->submissions_size - tail_count;
+            memmove(queue->submissions + index, queue->submissions + queue->submissions_head,
+                    tail_count * sizeof(*queue->submissions));
+            queue->submissions_head = index;
+        }
+    }
+
+    index = queue->submissions_head + queue->submissions_count;
+    if (index >= queue->submissions_size)
+        index -= queue->submissions_size;
+    queue->submissions[index] = *sub;
+    queue->submissions_count++;
     pthread_cond_signal(&queue->queue_cond);
 }
 
@@ -26214,8 +26240,9 @@ static void *d3d12_command_queue_submission_worker_main(void *userdata)
             pthread_cond_wait(&queue->queue_cond, &queue->queue_lock);
 
         queue->submissions_count--;
-        submission = queue->submissions[0];
-        memmove(queue->submissions, queue->submissions + 1, queue->submissions_count * sizeof(submission));
+        submission = queue->submissions[queue->submissions_head];
+        if (++queue->submissions_head == queue->submissions_size)
+            queue->submissions_head = 0;
         pthread_mutex_unlock(&queue->queue_lock);
 
         if (submission.type != VKD3D_SUBMISSION_BIND_SPARSE)
@@ -26381,6 +26408,7 @@ static HRESULT d3d12_command_queue_init(struct d3d12_command_queue *queue,
     queue->submissions = NULL;
     queue->submissions_count = 0;
     queue->submissions_size = 0;
+    queue->submissions_head = 0;
     queue->drain_count = 0;
     queue->queue_drain_count = 0;
 
