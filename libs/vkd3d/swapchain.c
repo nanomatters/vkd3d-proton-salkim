@@ -4413,7 +4413,9 @@ static void *dxgi_vk_swap_chain_wait_worker(void *chain_)
 
         end_frame_time_ns = vkd3d_get_current_time_ns();
 
-        if (chain->present.wait && !entry.present_timing_enabled)
+        /* Pace CPU completion even without present-wait. Driver-timed presents
+         * already have a target, and error retirement must remain unpaced. */
+        if (!entry.present_timing_enabled && entry.blit_count == UINT64_MAX)
             dxgi_vk_swap_chain_delay_next_frame(chain, end_frame_time_ns);
 
         dxgi_vk_swap_chain_update_frame_statistics(chain, entry.present_count, entry.id);
