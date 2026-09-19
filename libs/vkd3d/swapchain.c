@@ -485,7 +485,7 @@ static VkResult dxgi_vk_swap_chain_wait_acquire_semaphore(struct dxgi_vk_swap_ch
     return vr;
 }
 
-static void dxgi_vk_swap_chain_ensure_unsignaled_swapchain_fence(struct dxgi_vk_swap_chain *chain, uint32_t index)
+static VkResult dxgi_vk_swap_chain_ensure_unsignaled_swapchain_fence(struct dxgi_vk_swap_chain *chain, uint32_t index)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
     VkFenceCreateInfo fence_info;
@@ -501,11 +501,17 @@ static void dxgi_vk_swap_chain_ensure_unsignaled_swapchain_fence(struct dxgi_vk_
             if (vr)
             {
                 ERR("Failed to wait for fences, vr %d\n", vr);
+                return vr;
             }
             else
             {
-                VK_CALL(vkResetFences(chain->queue->device->vk_device,
+                vr = VK_CALL(vkResetFences(chain->queue->device->vk_device,
                         1, &chain->present.vk_swapchain_fences[index]));
+                if (vr != VK_SUCCESS)
+                {
+                    ERR("Failed to reset swapchain fence, vr %d.\n", vr);
+                    return vr;
+                }
                 chain->present.vk_swapchain_fences_signalled[index] = false;
             }
         }
@@ -518,8 +524,13 @@ static void dxgi_vk_swap_chain_ensure_unsignaled_swapchain_fence(struct dxgi_vk_
         vr = VK_CALL(vkCreateFence(chain->queue->device->vk_device,
                 &fence_info, NULL, &chain->present.vk_swapchain_fences[index]));
         if (vr)
+        {
             ERR("Failed to create swapchain fence, vr %d.\n", vr);
+            chain->present.vk_swapchain_fences[index] = VK_NULL_HANDLE;
+            return vr;
+        }
     }
+    return VK_SUCCESS;
 }
 
 static void dxgi_vk_swap_chain_drain_swapchain_fences(struct dxgi_vk_swap_chain *chain)
@@ -3502,6 +3513,20 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
     swapchain_index = chain->present.current_backbuffer_index;
     assert(swapchain_index != UINT32_MAX);
 
+    /* Prepare the fence before submitting the blit. On failure there must not
+     * be a new release-semaphore signal with no presentation to consume it. */
+    if (chain->swapchain_maintenance1)
+    {
+        chain->present.swapchain_fence_index = (chain->present.swapchain_fence_index + 1) %
+                ARRAY_SIZE(chain->present.vk_swapchain_fences);
+        vr = dxgi_vk_swap_chain_ensure_unsignaled_swapchain_fence(chain, chain->present.swapchain_fence_index);
+        if (vr != VK_SUCCESS)
+        {
+            dxgi_vk_swap_chain_set_error(chain, vr);
+            return;
+        }
+    }
+
     if (!dxgi_vk_swap_chain_submit_blit(chain, swapchain_index))
         return;
 
@@ -3516,16 +3541,12 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
 
     if (chain->swapchain_maintenance1)
     {
-        chain->present.swapchain_fence_index = (chain->present.swapchain_fence_index + 1) %
-                ARRAY_SIZE(chain->present.vk_swapchain_fences);
-
         present_fence_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT;
         present_fence_info.swapchainCount = 1;
         present_fence_info.pFences = &chain->present.vk_swapchain_fences[chain->present.swapchain_fence_index];
         present_fence_info.pNext = NULL;
         vk_prepend_struct(&present_info, &present_fence_info);
 
-        dxgi_vk_swap_chain_ensure_unsignaled_swapchain_fence(chain, chain->present.swapchain_fence_index);
         chain->present.vk_swapchain_fences_signalled[chain->present.swapchain_fence_index] = true;
 
         if (chain->present.compatible_unlocked_present_mode)
