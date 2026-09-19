@@ -2790,7 +2790,7 @@ static VkResult dxgi_vk_swap_chain_present_signal_blit_semaphore(struct dxgi_vk_
     {
         memset(&fence_info, 0, sizeof(fence_info));
         fence_info.vk_semaphore = chain->present.vk_complete_semaphore;
-        fence_info.vk_semaphore_value = chain->present.present_count;
+        fence_info.vk_semaphore_value = present_count;
 
         vkd3d_enqueue_timeline_semaphore(&chain->queue->fence_worker, &fence_info, &cookie);
     }
