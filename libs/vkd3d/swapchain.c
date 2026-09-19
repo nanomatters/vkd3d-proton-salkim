@@ -205,7 +205,7 @@ struct dxgi_vk_swap_chain
     vkd3d_native_sync_handle frame_latency_event_internal;
     bool outstanding_present_request;
     uint32_t frame_latency_event_internal_wait_counts;
-    uint32_t present_error; /* HRESULT published by the submission worker. */
+    uint32_t present_error; /* First presentation or synchronization error, as HRESULT. */
 
     UINT frame_latency;
     UINT frame_latency_internal;
@@ -426,7 +426,7 @@ struct dxgi_vk_swap_chain
     } wait_thread;
 };
 
-static void dxgi_vk_swap_chain_drain_internal_blit_semaphore(struct dxgi_vk_swap_chain *chain, uint64_t value);
+static VkResult dxgi_vk_swap_chain_drain_internal_blit_semaphore(struct dxgi_vk_swap_chain *chain, uint64_t value);
 static void dxgi_vk_swap_chain_wait_for_present_count(struct dxgi_vk_swap_chain *chain, uint64_t count);
 
 static HRESULT dxgi_vk_swap_chain_get_error(struct dxgi_vk_swap_chain *chain)
@@ -441,8 +441,8 @@ static void dxgi_vk_swap_chain_set_error(struct dxgi_vk_swap_chain *chain, VkRes
                 vkd3d_memory_order_release, vkd3d_memory_order_relaxed);
 }
 
-static void dxgi_vk_swap_chain_wait_acquire_semaphore(struct dxgi_vk_swap_chain *chain,
-        VkSemaphore vk_semaphore, bool blocking)
+static VkResult dxgi_vk_swap_chain_wait_acquire_semaphore(struct dxgi_vk_swap_chain *chain,
+        VkSemaphore vk_semaphore)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
     VkSemaphoreSubmitInfo signal_info;
@@ -481,8 +481,8 @@ static void dxgi_vk_swap_chain_wait_acquire_semaphore(struct dxgi_vk_swap_chain 
     if (vr == VK_SUCCESS)
         chain->present.internal_blit_count = signal_info.value;
 
-    if (vr == VK_SUCCESS && blocking)
-        dxgi_vk_swap_chain_drain_internal_blit_semaphore(chain, chain->present.internal_blit_count);
+    dxgi_vk_swap_chain_set_error(chain, vr);
+    return vr;
 }
 
 static void dxgi_vk_swap_chain_ensure_unsignaled_swapchain_fence(struct dxgi_vk_swap_chain *chain, uint32_t index)
@@ -530,7 +530,7 @@ static void dxgi_vk_swap_chain_drain_swapchain_fences(struct dxgi_vk_swap_chain 
             dxgi_vk_swap_chain_ensure_unsignaled_swapchain_fence(chain, i);
 }
 
-static void dxgi_vk_swap_chain_wait_semaphore(struct dxgi_vk_swap_chain *chain,
+static VkResult dxgi_vk_swap_chain_wait_semaphore(struct dxgi_vk_swap_chain *chain,
         VkSemaphore vk_timeline, uint64_t value)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
@@ -538,7 +538,7 @@ static void dxgi_vk_swap_chain_wait_semaphore(struct dxgi_vk_swap_chain *chain,
     VkResult vr;
 
     if (!value)
-        return;
+        return VK_SUCCESS;
 
     memset(&wait_info, 0, sizeof(wait_info));
     wait_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
@@ -548,16 +548,18 @@ static void dxgi_vk_swap_chain_wait_semaphore(struct dxgi_vk_swap_chain *chain,
     vr = VK_CALL(vkWaitSemaphores(chain->queue->device->vk_device, &wait_info, UINT64_MAX));
     if (vr)
         ERR("Failed to wait for present semaphore, vr %d.\n", vr);
+    dxgi_vk_swap_chain_set_error(chain, vr);
+    return vr;
 }
 
-static void dxgi_vk_swap_chain_drain_complete_semaphore(struct dxgi_vk_swap_chain *chain, uint64_t value)
+static VkResult dxgi_vk_swap_chain_drain_complete_semaphore(struct dxgi_vk_swap_chain *chain, uint64_t value)
 {
-    dxgi_vk_swap_chain_wait_semaphore(chain, chain->present.vk_complete_semaphore, value);
+    return dxgi_vk_swap_chain_wait_semaphore(chain, chain->present.vk_complete_semaphore, value);
 }
 
-static void dxgi_vk_swap_chain_drain_internal_blit_semaphore(struct dxgi_vk_swap_chain *chain, uint64_t value)
+static VkResult dxgi_vk_swap_chain_drain_internal_blit_semaphore(struct dxgi_vk_swap_chain *chain, uint64_t value)
 {
-    dxgi_vk_swap_chain_wait_semaphore(chain, chain->present.vk_internal_blit_semaphore, value);
+    return dxgi_vk_swap_chain_wait_semaphore(chain, chain->present.vk_internal_blit_semaphore, value);
 }
 
 static void dxgi_vk_swap_chain_drain_user_images(struct dxgi_vk_swap_chain *chain)
@@ -581,7 +583,7 @@ static void dxgi_vk_swap_chain_drain_queue(struct dxgi_vk_swap_chain *chain)
     /* If we have a lingering semaphore acquire that never went anywhere, ensure it is waited on. */
     for (i = 0; i < ARRAY_SIZE(chain->present.vk_acquire_semaphore); i++)
         if (chain->present.vk_acquire_semaphore[i] && chain->present.acquire_semaphore_signalled[i])
-            dxgi_vk_swap_chain_wait_acquire_semaphore(chain, chain->present.vk_acquire_semaphore[i], false);
+            dxgi_vk_swap_chain_wait_acquire_semaphore(chain, chain->present.vk_acquire_semaphore[i]);
 
     /* Wait for pending blits to complete on the GPU */
     dxgi_vk_swap_chain_drain_internal_blit_semaphore(chain, chain->present.internal_blit_count);
@@ -3084,7 +3086,9 @@ static bool dxgi_vk_swap_chain_submit_blit(struct dxgi_vk_swap_chain *chain, uin
         }
     }
 
-    dxgi_vk_swap_chain_drain_internal_blit_semaphore(chain, chain->present.backbuffer_blit_timelines[swapchain_index]);
+    if (dxgi_vk_swap_chain_drain_internal_blit_semaphore(chain,
+            chain->present.backbuffer_blit_timelines[swapchain_index]) != VK_SUCCESS)
+        return false;
 
     vk_cmd = chain->present.vk_blit_command_buffers[swapchain_index];
 
@@ -3149,6 +3153,7 @@ static bool dxgi_vk_swap_chain_submit_blit(struct dxgi_vk_swap_chain *chain, uin
     if (vr < 0)
     {
         ERR("Failed to submit swapchain blit, vr %d.\n", vr);
+        dxgi_vk_swap_chain_set_error(chain, vr);
     }
     else
     {
@@ -3176,23 +3181,23 @@ static VkResult dxgi_vk_swap_chain_ensure_unsignaled_acquire_semaphore(struct dx
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
     VkSemaphoreCreateInfo sem_info;
     VkResult vr = VK_SUCCESS;
-    uint64_t drain_count;
-
-    if (blocking)
-    {
-        /* Any pending wait must have been satisfied before we queue up a new signal. */
-        drain_count = chain->present.acquire_semaphore_consumed_at_blit[index];
-        if (drain_count)
-            dxgi_vk_swap_chain_drain_internal_blit_semaphore(chain, drain_count);
-    }
 
     if (chain->present.acquire_semaphore_signalled[index])
     {
         /* There is no pending wait, so we insert it now. */
-        dxgi_vk_swap_chain_wait_acquire_semaphore(chain, chain->present.vk_acquire_semaphore[index], blocking);
+        if ((vr = dxgi_vk_swap_chain_wait_acquire_semaphore(chain,
+                chain->present.vk_acquire_semaphore[index])) != VK_SUCCESS)
+            return vr;
+
+        /* Record the accepted wait even if waiting for its completion fails. */
         chain->present.acquire_semaphore_consumed_at_blit[index] = chain->present.internal_blit_count;
         chain->present.acquire_semaphore_signalled[index] = false;
     }
+
+    /* Any pending wait must have completed before we queue up a new signal. */
+    if (blocking && (vr = dxgi_vk_swap_chain_drain_internal_blit_semaphore(chain,
+            chain->present.acquire_semaphore_consumed_at_blit[index])) != VK_SUCCESS)
+        return vr;
 
     if (!chain->present.vk_acquire_semaphore[index])
     {
