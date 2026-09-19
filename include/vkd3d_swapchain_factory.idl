@@ -190,12 +190,15 @@ interface IDXGIVkSwapChain2 : IDXGIVkSwapChain1
 [
     object,
     local,
-    uuid(deb1f1b9-48c7-4310-b5a9-3b92f593023f)
+    uuid(e0982f6b-41d7-4a1f-8aa9-cecb15da2360)
 ]
 interface IDXGIVkSwapChainHud : IDXGIVkSwapChain2
 {
     HRESULT SetHudData(
         const DXGI_VK_HUD_DATA*    pData);
+
+    /* Last successfully submitted VkPresentModeKHR, or MAX_ENUM if unavailable. */
+    UINT GetPresentMode();
 }
 
 /* This private interface is versioned by its GUID. */
