@@ -995,7 +995,8 @@ static HRESULT dxgi_vk_swap_chain_allocate_user_buffer(struct dxgi_vk_swap_chain
 static HRESULT dxgi_vk_swap_chain_reallocate_user_buffers(struct dxgi_vk_swap_chain *chain)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
-    struct d3d12_resource *old_resources[DXGI_MAX_SWAP_CHAIN_BUFFERS];
+    struct d3d12_resource *resources[DXGI_MAX_SWAP_CHAIN_BUFFERS] = {0};
+    VkImageView views[DXGI_MAX_SWAP_CHAIN_BUFFERS] = {0};
     VkImageViewCreateInfo view_info;
     unsigned int i;
     VkResult vr;
@@ -1003,14 +1004,6 @@ static HRESULT dxgi_vk_swap_chain_reallocate_user_buffers(struct dxgi_vk_swap_ch
 
     if (chain->desc.BufferCount > DXGI_MAX_SWAP_CHAIN_BUFFERS)
         return E_INVALIDARG;
-
-    for (i = 0; i < DXGI_MAX_SWAP_CHAIN_BUFFERS; i++)
-    {
-        old_resources[i] = chain->user.backbuffers[i];
-        chain->user.backbuffers[i] = NULL;
-        VK_CALL(vkDestroyImageView(chain->queue->device->vk_device, chain->user.vk_image_views[i], NULL));
-        chain->user.vk_image_views[i] = VK_NULL_HANDLE;
-    }
 
     memset(&view_info, 0, sizeof(view_info));
     view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -1025,36 +1018,43 @@ static HRESULT dxgi_vk_swap_chain_reallocate_user_buffers(struct dxgi_vk_swap_ch
 
     for (i = 0; i < chain->desc.BufferCount; i++)
     {
-        if (FAILED(hr = dxgi_vk_swap_chain_allocate_user_buffer(chain, &chain->desc, &chain->user.backbuffers[i])))
+        if (FAILED(hr = dxgi_vk_swap_chain_allocate_user_buffer(chain, &chain->desc, &resources[i])))
             goto err;
 
         /* We need to hold a private reference to the resource, not a public one. */
-        vkd3d_resource_incref((ID3D12Resource *)&chain->user.backbuffers[i]->ID3D12Resource_iface);
-        ID3D12Resource2_Release(&chain->user.backbuffers[i]->ID3D12Resource_iface);
+        vkd3d_resource_incref((ID3D12Resource *)&resources[i]->ID3D12Resource_iface);
+        ID3D12Resource2_Release(&resources[i]->ID3D12Resource_iface);
 
-        view_info.format = chain->user.backbuffers[i]->format->vk_format;
-        view_info.image = chain->user.backbuffers[i]->res.vk_image;
-        vr = VK_CALL(vkCreateImageView(chain->queue->device->vk_device, &view_info, NULL, &chain->user.vk_image_views[i]));
+        view_info.format = resources[i]->format->vk_format;
+        view_info.image = resources[i]->res.vk_image;
+        vr = VK_CALL(vkCreateImageView(chain->queue->device->vk_device, &view_info, NULL, &views[i]));
         if (vr < 0)
         {
             ERR("Failed to create image view for user image %u.\n", i);
-            hr = E_OUTOFMEMORY;
+            views[i] = VK_NULL_HANDLE;
+            hr = hresult_from_vk_result(vr);
             goto err;
         }
     }
 
+    /* Replace resources and their views together only after all allocations succeed. */
     for (i = 0; i < DXGI_MAX_SWAP_CHAIN_BUFFERS; i++)
-        if (old_resources[i])
-            vkd3d_resource_decref((ID3D12Resource *)&old_resources[i]->ID3D12Resource_iface);
+    {
+        VK_CALL(vkDestroyImageView(chain->queue->device->vk_device, chain->user.vk_image_views[i], NULL));
+        if (chain->user.backbuffers[i])
+            vkd3d_resource_decref((ID3D12Resource *)&chain->user.backbuffers[i]->ID3D12Resource_iface);
+        chain->user.backbuffers[i] = resources[i];
+        chain->user.vk_image_views[i] = views[i];
+    }
 
     return S_OK;
 
 err:
     for (i = 0; i < DXGI_MAX_SWAP_CHAIN_BUFFERS; i++)
     {
-        if (chain->user.backbuffers[i])
-            vkd3d_resource_decref((ID3D12Resource *)&chain->user.backbuffers[i]->ID3D12Resource_iface);
-        chain->user.backbuffers[i] = old_resources[i];
+        VK_CALL(vkDestroyImageView(chain->queue->device->vk_device, views[i], NULL));
+        if (resources[i])
+            vkd3d_resource_decref((ID3D12Resource *)&resources[i]->ID3D12Resource_iface);
     }
     return hr;
 }
@@ -1064,6 +1064,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_ChangeProperties(IDXGIVkSwap
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     DXGI_SWAP_CHAIN_DESC1 old_desc = chain->desc;
+    bool reallocate;
     HRESULT hr;
     UINT i;
 
@@ -1078,25 +1079,25 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_ChangeProperties(IDXGIVkSwap
         if (chain->user.backbuffers[i]->refcount != 0)
             return DXGI_ERROR_INVALID_CALL;
 
-    chain->desc = *pDesc;
+    reallocate = old_desc.Width != pDesc->Width ||
+            old_desc.Height != pDesc->Height ||
+            old_desc.BufferCount != pDesc->BufferCount ||
+            old_desc.Format != pDesc->Format ||
+            old_desc.Flags != pDesc->Flags;
 
-    /* Don't do anything in this case. */
-    if (old_desc.Width == chain->desc.Width &&
-            old_desc.Height == chain->desc.Height &&
-            old_desc.BufferCount == chain->desc.BufferCount &&
-            old_desc.Format == chain->desc.Format &&
-            old_desc.Flags == chain->desc.Flags)
-    {
-        return S_OK;
-    }
-
-    /* Waits for any outstanding present event to complete, including the work it takes to blit to screen. */
-    dxgi_vk_swap_chain_drain_user_images(chain);
+    /* Callbacks also read non-buffer properties, such as the scaling mode.
+     * Only replacing buffers needs to wait for GPU completion as well. */
+    if (reallocate)
+        dxgi_vk_swap_chain_drain_user_images(chain);
+    else
+        dxgi_vk_swap_chain_wait_for_present_count(chain, chain->user.present_count);
     if (FAILED(hr = dxgi_vk_swap_chain_get_error(chain)))
-    {
-        chain->desc = old_desc;
         return hr;
-    }
+
+    /* Pending callbacks must keep seeing the old buffer geometry until drained. */
+    chain->desc = *pDesc;
+    if (!reallocate)
+        return S_OK;
 
     INFO("Reallocating swapchain (%u x %u), BufferCount = %u.\n",
             chain->desc.Width, chain->desc.Height, chain->desc.BufferCount);
