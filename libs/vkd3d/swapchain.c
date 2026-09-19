@@ -207,6 +207,7 @@ struct dxgi_vk_swap_chain
     bool outstanding_present_request;
     uint32_t frame_latency_event_internal_wait_counts;
     uint32_t present_error; /* First presentation or synchronization error, as HRESULT. */
+    uint32_t last_present_mode; /* Atomically published for the HUD thread. */
 
     UINT frame_latency;
     UINT frame_latency_internal;
@@ -1682,6 +1683,12 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetHudData(IDXGIVkSwapChainH
     return S_OK;
 }
 
+static UINT STDMETHODCALLTYPE dxgi_vk_swap_chain_GetPresentMode(IDXGIVkSwapChainHud *iface)
+{
+    struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
+    return vkd3d_atomic_uint32_load_explicit(&chain->last_present_mode, vkd3d_memory_order_relaxed);
+}
+
 static CONST_VTBL struct IDXGIVkSwapChainHudVtbl dxgi_vk_swap_chain_vtbl =
 {
     /* IUnknown methods */
@@ -1712,6 +1719,7 @@ static CONST_VTBL struct IDXGIVkSwapChainHudVtbl dxgi_vk_swap_chain_vtbl =
     dxgi_vk_swap_chain_SetTargetFrameRate,
     /* IDXGIVkSwapChainHud methods */
     dxgi_vk_swap_chain_SetHudData,
+    dxgi_vk_swap_chain_GetPresentMode,
 };
 
 static CONST_VTBL struct IDXGIVkSwapChainPresentTelemetry1Vtbl dxgi_vk_swap_chain_present_telemetry_vtbl =
@@ -2038,6 +2046,8 @@ static void dxgi_vk_swap_chain_destroy_swapchain_in_present_task(struct dxgi_vk_
 
     VK_CALL(vkDestroySwapchainKHR(chain->queue->device->vk_device, chain->present.vk_swapchain, NULL));
     chain->present.vk_swapchain = VK_NULL_HANDLE;
+    vkd3d_atomic_uint32_store_explicit(&chain->last_present_mode,
+            VK_PRESENT_MODE_MAX_ENUM_KHR, vkd3d_memory_order_relaxed);
     chain->present.backbuffer_width = 0;
     chain->present.backbuffer_height = 0;
     chain->present.backbuffer_format = VK_FORMAT_UNDEFINED;
@@ -3688,7 +3698,11 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
         dxgi_vk_swap_chain_take_present_timing(chain, timing_id);
 
     if (vr >= 0)
+    {
+        vkd3d_atomic_uint32_store_explicit(&chain->last_present_mode,
+                chain->present.selected_present_mode, vkd3d_memory_order_relaxed);
         chain->present.current_backbuffer_index = UINT32_MAX;
+    }
 
     if (use_present_id && vr >= 0)
         chain->present.present_id_valid = true;
@@ -4656,6 +4670,7 @@ static HRESULT dxgi_vk_swap_chain_init(struct dxgi_vk_swap_chain *chain, IDXGIVk
 
     chain->IDXGIVkSwapChain_iface.lpVtbl = &dxgi_vk_swap_chain_vtbl;
     chain->IDXGIVkSwapChainPresentTelemetry_iface.lpVtbl = &dxgi_vk_swap_chain_present_telemetry_vtbl;
+    chain->last_present_mode = VK_PRESENT_MODE_MAX_ENUM_KHR;
     chain->refcount = 1;
     chain->internal_refcount = 1;
     chain->queue = queue;
