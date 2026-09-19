@@ -150,6 +150,8 @@ struct present_wait_entry
 {
     uint64_t id;
     uint64_t present_count;
+    /* UINT64_MAX uses the normal completion signal. Otherwise drain accepted blits. */
+    uint64_t blit_count;
     uint64_t begin_frame_time_ns;
     bool present_timing_enabled;
 };
@@ -203,6 +205,7 @@ struct dxgi_vk_swap_chain
     vkd3d_native_sync_handle frame_latency_event_internal;
     bool outstanding_present_request;
     uint32_t frame_latency_event_internal_wait_counts;
+    uint32_t present_error; /* HRESULT published by the submission worker. */
 
     UINT frame_latency;
     UINT frame_latency_internal;
@@ -424,6 +427,19 @@ struct dxgi_vk_swap_chain
 };
 
 static void dxgi_vk_swap_chain_drain_internal_blit_semaphore(struct dxgi_vk_swap_chain *chain, uint64_t value);
+static void dxgi_vk_swap_chain_wait_for_present_count(struct dxgi_vk_swap_chain *chain, uint64_t count);
+
+static HRESULT dxgi_vk_swap_chain_get_error(struct dxgi_vk_swap_chain *chain)
+{
+    return vkd3d_atomic_uint32_load_explicit(&chain->present_error, vkd3d_memory_order_acquire);
+}
+
+static void dxgi_vk_swap_chain_set_error(struct dxgi_vk_swap_chain *chain, VkResult vr)
+{
+    if (vr < 0)
+        vkd3d_atomic_uint32_compare_exchange(&chain->present_error, S_OK, hresult_from_vk_result(vr),
+                vkd3d_memory_order_release, vkd3d_memory_order_relaxed);
+}
 
 static void dxgi_vk_swap_chain_wait_acquire_semaphore(struct dxgi_vk_swap_chain *chain,
         VkSemaphore vk_semaphore, bool blocking)
@@ -451,7 +467,7 @@ static void dxgi_vk_swap_chain_wait_acquire_semaphore(struct dxgi_vk_swap_chain 
     signal_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
     signal_info.semaphore = chain->present.vk_internal_blit_semaphore;
     signal_info.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    signal_info.value = ++chain->present.internal_blit_count;
+    signal_info.value = chain->present.internal_blit_count + 1;
 
     vk_queue = vkd3d_queue_acquire(chain->queue->vkd3d_queue);
     vr = VK_CALL(vkQueueSubmit2(vk_queue, 1, &submit_info, VK_NULL_HANDLE));
@@ -461,6 +477,9 @@ static void dxgi_vk_swap_chain_wait_acquire_semaphore(struct dxgi_vk_swap_chain 
         VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST);
     }
     vkd3d_queue_release(chain->queue->vkd3d_queue);
+
+    if (vr == VK_SUCCESS)
+        chain->present.internal_blit_count = signal_info.value;
 
     if (vr == VK_SUCCESS && blocking)
         dxgi_vk_swap_chain_drain_internal_blit_semaphore(chain, chain->present.internal_blit_count);
@@ -543,7 +562,10 @@ static void dxgi_vk_swap_chain_drain_internal_blit_semaphore(struct dxgi_vk_swap
 
 static void dxgi_vk_swap_chain_drain_user_images(struct dxgi_vk_swap_chain *chain)
 {
-    dxgi_vk_swap_chain_drain_complete_semaphore(chain, chain->user.blit_count);
+    /* Wait for the callback before reading the last accepted blit. A rejected
+     * completion submit must not leave a wait for an unscheduled signal. */
+    dxgi_vk_swap_chain_wait_for_present_count(chain, chain->user.present_count);
+    dxgi_vk_swap_chain_drain_internal_blit_semaphore(chain, chain->present.internal_blit_count);
 }
 
 static void dxgi_vk_swap_chain_drain_queue(struct dxgi_vk_swap_chain *chain)
@@ -562,7 +584,7 @@ static void dxgi_vk_swap_chain_drain_queue(struct dxgi_vk_swap_chain *chain)
             dxgi_vk_swap_chain_wait_acquire_semaphore(chain, chain->present.vk_acquire_semaphore[i], false);
 
     /* Wait for pending blits to complete on the GPU */
-    dxgi_vk_swap_chain_drain_complete_semaphore(chain, chain->user.present_count);
+    dxgi_vk_swap_chain_drain_internal_blit_semaphore(chain, chain->present.internal_blit_count);
 
     if (chain->swapchain_maintenance1)
         dxgi_vk_swap_chain_drain_swapchain_fences(chain);
@@ -570,7 +592,7 @@ static void dxgi_vk_swap_chain_drain_queue(struct dxgi_vk_swap_chain *chain)
 
 static void dxgi_vk_swap_chain_push_present_id(struct dxgi_vk_swap_chain *chain,
         uint64_t present_count, uint64_t present_id,
-        uint64_t begin_frame_time_ns, bool present_timing_enabled)
+        uint64_t begin_frame_time_ns, bool present_timing_enabled, uint64_t blit_count)
 {
     struct present_wait_entry *entry;
     pthread_mutex_lock(&chain->wait_thread.lock);
@@ -579,6 +601,7 @@ static void dxgi_vk_swap_chain_push_present_id(struct dxgi_vk_swap_chain *chain,
     entry = &chain->wait_thread.wait_queue[chain->wait_thread.wait_queue_count++];
     entry->id = present_id;
     entry->present_count = present_count;
+    entry->blit_count = blit_count;
     entry->begin_frame_time_ns = begin_frame_time_ns;
     entry->present_timing_enabled = present_timing_enabled;
     if (present_count)
@@ -609,7 +632,7 @@ static void dxgi_vk_swap_chain_cleanup_low_latency(struct dxgi_vk_swap_chain *ch
 
 static void dxgi_vk_swap_chain_cleanup_waiter_thread(struct dxgi_vk_swap_chain *chain)
 {
-    dxgi_vk_swap_chain_push_present_id(chain, 0, 0, 0, true);
+    dxgi_vk_swap_chain_push_present_id(chain, 0, 0, 0, true, 0);
     pthread_join(chain->wait_thread.thread, NULL);
     pthread_mutex_destroy(&chain->wait_thread.lock);
     pthread_cond_destroy(&chain->wait_thread.cond);
@@ -1034,6 +1057,8 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_ChangeProperties(IDXGIVkSwap
     TRACE("iface %p, pDesc %p, pNodeMasks %p, ppPresentQueues %p!\n", iface, pDesc, pNodeMasks, ppPresentQueues);
 
     /* TODO: Validate pNodeMasks and ppPresentQueues. */
+    if (FAILED(hr = dxgi_vk_swap_chain_get_error(chain)))
+        return hr;
 
     /* Public ref-counts must be 0 for this to be allowed. */
     for (i = 0; i < chain->desc.BufferCount; i++)
@@ -1054,6 +1079,11 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_ChangeProperties(IDXGIVkSwap
 
     /* Waits for any outstanding present event to complete, including the work it takes to blit to screen. */
     dxgi_vk_swap_chain_drain_user_images(chain);
+    if (FAILED(hr = dxgi_vk_swap_chain_get_error(chain)))
+    {
+        chain->desc = old_desc;
+        return hr;
+    }
 
     INFO("Reallocating swapchain (%u x %u), BufferCount = %u.\n",
             chain->desc.Width, chain->desc.Height, chain->desc.BufferCount);
@@ -1308,10 +1338,14 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChainHud 
     struct dxgi_vk_swap_chain_hud_frame hud;
     struct vkd3d_queue_timeline_trace_cookie cookie;
     bool low_latency_enable;
+    HRESULT hr;
 
     TRACE("iface %p, SyncInterval %u, PresentFlags #%x, pPresentParameters %p.\n",
             iface, SyncInterval, PresentFlags, pPresentParameters);
     (void)pPresentParameters;
+
+    if (FAILED(hr = dxgi_vk_swap_chain_get_error(chain)))
+        return hr;
 
     if (dxgi_vk_swap_chain_present_is_occluded(chain))
         return DXGI_STATUS_OCCLUDED;
@@ -1323,6 +1357,8 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChainHud 
     if (chain->user.present_count >= ARRAY_SIZE(chain->request_ring))
         dxgi_vk_swap_chain_wait_for_present_count(chain,
                 chain->user.present_count - ARRAY_SIZE(chain->request_ring) + 1);
+    if (FAILED(hr = dxgi_vk_swap_chain_get_error(chain)))
+        return hr;
 
     assert(chain->user.index < chain->desc.BufferCount);
 
@@ -1435,7 +1471,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChainHud 
     vkd3d_queue_timeline_trace_complete_present_block(
             &chain->queue->device->queue_timeline_trace, cookie);
 
-    return S_OK;
+    return dxgi_vk_swap_chain_get_error(chain);
 }
 
 static VkColorSpaceKHR convert_color_space(DXGI_COLOR_SPACE_TYPE dxgi_color_space);
@@ -2696,7 +2732,7 @@ static bool dxgi_vk_swap_chain_request_needs_swapchain_recreation(
                     !chain->present.override_present_mode);
 }
 
-static void dxgi_vk_swap_chain_present_signal_blit_semaphore(struct dxgi_vk_swap_chain *chain, uint64_t present_count)
+static VkResult dxgi_vk_swap_chain_present_signal_blit_semaphore(struct dxgi_vk_swap_chain *chain, uint64_t present_count)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
     struct vkd3d_queue_timeline_trace_cookie cookie;
@@ -2723,6 +2759,13 @@ static void dxgi_vk_swap_chain_present_signal_blit_semaphore(struct dxgi_vk_swap
     vr = VK_CALL(vkQueueSubmit2(vk_queue, 1, &submit_info, VK_NULL_HANDLE));
     vkd3d_queue_release(chain->queue->vkd3d_queue);
 
+    if (vr != VK_SUCCESS)
+    {
+        ERR("Failed to submit present completion, vr = %d.\n", vr);
+        VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST);
+        return vr;
+    }
+
     /* Mark frame boundary. */
     cookie = vkd3d_queue_timeline_trace_register_swapchain_blit(
             &chain->queue->device->queue_timeline_trace,
@@ -2738,11 +2781,7 @@ static void dxgi_vk_swap_chain_present_signal_blit_semaphore(struct dxgi_vk_swap
         vkd3d_enqueue_timeline_semaphore(&chain->queue->fence_worker, &fence_info, &cookie);
     }
 
-    if (vr)
-    {
-        ERR("Failed to submit present discard, vr = %d.\n", vr);
-        VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST);
-    }
+    return VK_SUCCESS;
 }
 
 static void dxgi_vk_swap_chain_record_render_pass(struct dxgi_vk_swap_chain *chain, VkCommandBuffer vk_cmd, uint32_t swapchain_index)
@@ -3071,16 +3110,15 @@ static bool dxgi_vk_swap_chain_submit_blit(struct dxgi_vk_swap_chain *chain, uin
     signal_semaphore_info[0].semaphore = chain->present.vk_release_semaphores[swapchain_index];
     signal_semaphore_info[0].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 
-    chain->present.internal_blit_count += 1;
     signal_semaphore_info[1].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
     signal_semaphore_info[1].semaphore = chain->present.vk_internal_blit_semaphore;
-    signal_semaphore_info[1].value = chain->present.internal_blit_count;
+    signal_semaphore_info[1].value = chain->present.internal_blit_count + 1;
     signal_semaphore_info[1].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 
     /* External submission */
     signal_semaphore_info[2].sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
     signal_semaphore_info[2].semaphore = chain->queue->vkd3d_queue->submission_timeline;
-    signal_semaphore_info[2].value = ++chain->queue->vkd3d_queue->submission_timeline_count;
+    signal_semaphore_info[2].value = chain->queue->vkd3d_queue->submission_timeline_count + 1;
     signal_semaphore_info[2].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 
     memset(&cmd_buffer_info, 0, sizeof(cmd_buffer_info));
@@ -3103,6 +3141,8 @@ static bool dxgi_vk_swap_chain_submit_blit(struct dxgi_vk_swap_chain *chain, uin
     submit_infos[1].pSignalSemaphoreInfos = &signal_semaphore_info[1];
 
     vr = VK_CALL(vkQueueSubmit2(vk_queue, ARRAY_SIZE(submit_infos), submit_infos, VK_NULL_HANDLE));
+    if (vr == VK_SUCCESS)
+        chain->queue->vkd3d_queue->submission_timeline_count = signal_semaphore_info[2].value;
     vkd3d_queue_release(chain->queue->vkd3d_queue);
     VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST);
 
@@ -3112,6 +3152,7 @@ static bool dxgi_vk_swap_chain_submit_blit(struct dxgi_vk_swap_chain *chain, uin
     }
     else
     {
+        chain->present.internal_blit_count = signal_semaphore_info[1].value;
         chain->present.backbuffer_blit_timelines[swapchain_index] =
                 chain->present.internal_blit_count;
         chain->present.acquire_semaphore_consumed_at_blit[chain->present.acquire_semaphore_index] =
@@ -3646,13 +3687,15 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
     }
 }
 
-static void dxgi_vk_swap_chain_signal_waitable_handle(struct dxgi_vk_swap_chain *chain, uint64_t present_count)
+static void dxgi_vk_swap_chain_signal_waitable_handle(struct dxgi_vk_swap_chain *chain,
+        uint64_t present_count, bool completion_submitted)
 {
-    uint64_t present_id = chain->present.present_id_valid ? chain->present.present_id : 0;
+    uint64_t present_id = completion_submitted && chain->present.present_id_valid ? chain->present.present_id : 0;
 
     dxgi_vk_swap_chain_push_present_id(chain, present_count, present_id,
             chain->request.begin_frame_time_ns,
-            chain->present.present_target_enabled);
+            chain->present.present_target_enabled,
+            completion_submitted ? UINT64_MAX : chain->present.internal_blit_count);
 }
 
 static void dxgi_vk_swap_chain_delay_next_frame(struct dxgi_vk_swap_chain *chain, uint64_t current_time_ns);
@@ -3688,6 +3731,7 @@ static void dxgi_vk_swap_chain_present_callback(void *chain_)
     const struct dxgi_vk_swap_chain_present_request *next_request;
     struct dxgi_vk_swap_chain *chain = chain_;
     uint64_t next_present_count;
+    VkResult vr = VK_SUCCESS;
 
     next_present_count = chain->present.present_count + 1;
     next_request = &chain->request_ring[next_present_count % ARRAY_SIZE(chain->request_ring)];
@@ -3710,14 +3754,20 @@ static void dxgi_vk_swap_chain_present_callback(void *chain_)
 
     /* A present iteration may or may not render to backbuffer. We'll apply best effort here.
      * Forward progress must be ensured, so if we cannot get anything on-screen in a reasonable amount of retries, ignore it. */
-    dxgi_vk_swap_chain_present_iteration(chain, next_present_count, 0);
+    if (SUCCEEDED(dxgi_vk_swap_chain_get_error(chain)))
+        dxgi_vk_swap_chain_present_iteration(chain, next_present_count, 0);
 
     /* When this is signalled, lets main thread know that it's safe to free user buffers.
      * Signal this just once on the outside since we might have retries, which complicates command buffer recycling. */
-    dxgi_vk_swap_chain_present_signal_blit_semaphore(chain, next_present_count);
+    if (SUCCEEDED(dxgi_vk_swap_chain_get_error(chain)))
+    {
+        vr = dxgi_vk_swap_chain_present_signal_blit_semaphore(chain, next_present_count);
+        dxgi_vk_swap_chain_set_error(chain, vr);
+    }
 
     /* Signal latency fence. */
-    dxgi_vk_swap_chain_signal_waitable_handle(chain, next_present_count);
+    dxgi_vk_swap_chain_signal_waitable_handle(chain, next_present_count,
+            SUCCEEDED(dxgi_vk_swap_chain_get_error(chain)));
 
 #ifdef VKD3D_ENABLE_BREADCRUMBS
     vkd3d_breadcrumb_tracer_update_barrier_hashes(&chain->queue->device->breadcrumb_tracer);
@@ -4328,7 +4378,10 @@ static void *dxgi_vk_swap_chain_wait_worker(void *chain_)
         }
         else
         {
-            dxgi_vk_swap_chain_drain_complete_semaphore(chain, entry.present_count);
+            if (entry.blit_count == UINT64_MAX)
+                dxgi_vk_swap_chain_drain_complete_semaphore(chain, entry.present_count);
+            else
+                dxgi_vk_swap_chain_drain_internal_blit_semaphore(chain, entry.blit_count);
         }
 
         end_frame_time_ns = vkd3d_get_current_time_ns();
