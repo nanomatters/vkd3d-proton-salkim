@@ -179,6 +179,7 @@ struct platform_sleep_state
 #endif
 
     uint64_t sleep_threshold_ns;
+    bool adaptive;
 };
 
 struct present_timing_calibration
@@ -4256,6 +4257,7 @@ static void dxgi_vk_swap_chain_delay_next_frame(struct dxgi_vk_swap_chain *chain
     uint64_t window_start_time_ns, window_total_time_ns, window_expected_time_ns;
     uint32_t frame_count_min, frame_count_max, frame_count;
     uint64_t sleep_threshold_ns, sleep_duration_ns;
+    uint64_t sleep_start_ns, requested_ns, elapsed_ns, observed_ns;
     uint32_t frame_latency = DEFAULT_FRAME_LATENCY;
     static const uint32_t max_window_size = 128u;
     static const uint32_t min_window_size = 8u;
@@ -4332,17 +4334,31 @@ static void dxgi_vk_swap_chain_delay_next_frame(struct dxgi_vk_swap_chain *chain
     if (current_time_ns >= next_deadline_ns)
         return;
 
-    /* Busy-wait for the last couple of milliseconds for accuracy, only use the
-     * platform's sleep function for durations longer than the threshold, which
-     * is an estimated error based on the timer interval and sleep duration. */
+    /* Wine's timer granularity does not describe host sleep precision. Learn
+     * the oversleep on this waiter thread, keeping native Windows unchanged. */
     sleep_duration_ns = next_deadline_ns - current_time_ns;
-    sleep_threshold_ns = sleep_state->sleep_threshold_ns + sleep_duration_ns / 6;
+    sleep_threshold_ns = sleep_state->sleep_threshold_ns;
+    if (!sleep_state->adaptive)
+        sleep_threshold_ns += sleep_duration_ns / 6;
 
     while (sleep_duration_ns > sleep_threshold_ns)
     {
-        dxgi_vk_swap_chain_platform_sleep_for_ns(sleep_state, sleep_duration_ns - sleep_threshold_ns);
+        requested_ns = sleep_duration_ns - sleep_threshold_ns;
+        sleep_start_ns = current_time_ns;
+        dxgi_vk_swap_chain_platform_sleep_for_ns(sleep_state, requested_ns);
 
         current_time_ns = vkd3d_get_current_time_ns();
+        if (sleep_state->adaptive)
+        {
+            elapsed_ns = current_time_ns - sleep_start_ns;
+            observed_ns = (elapsed_ns > requested_ns ? elapsed_ns - requested_ns : 0) + 50000;
+            /* React to late wakeups immediately, decay slowly, and bound the
+             * reserve so a scheduler stall cannot cause a long busy-wait. */
+            sleep_threshold_ns = max(observed_ns,
+                    sleep_state->sleep_threshold_ns - sleep_state->sleep_threshold_ns / 64);
+            sleep_threshold_ns = min(max(sleep_threshold_ns, 100000), 1000000);
+            sleep_state->sleep_threshold_ns = sleep_threshold_ns;
+        }
         sleep_duration_ns = next_deadline_ns > current_time_ns ? next_deadline_ns - current_time_ns : 0;
     }
 
@@ -4594,11 +4610,13 @@ static HRESULT dxgi_vk_swap_chain_init_sleep_state(struct platform_sleep_state *
     if (!sleep_state->NtDelayExecution)
         FIXME("NtDelayExecution not found in ntdll.\n");
 
-    sleep_state->sleep_threshold_ns = (is_wine ? 1 : 4) * sleep_granularity_ns;
+    sleep_state->adaptive = is_wine && sleep_state->NtDelayExecution;
+    sleep_state->sleep_threshold_ns = sleep_state->adaptive ? 200000 : (is_wine ? 1 : 4) * sleep_granularity_ns;
     return S_OK;
 #else
-    /* On native builds, we use nanosleep. Assume reasonable accuracy down to 1ms. */
-    sleep_state->sleep_threshold_ns = 1000000;
+    /* Native builds use nanosleep and can learn the host's precision directly. */
+    sleep_state->adaptive = true;
+    sleep_state->sleep_threshold_ns = 200000;
     return S_OK;
 #endif
 }
