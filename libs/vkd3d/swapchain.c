@@ -412,6 +412,7 @@ struct dxgi_vk_swap_chain
         size_t wait_queue_size;
         size_t wait_queue_count;
         pthread_cond_t cond;
+        pthread_cond_t present_cond;
         pthread_mutex_t lock;
         bool skip_waits;
 
@@ -580,6 +581,12 @@ static void dxgi_vk_swap_chain_push_present_id(struct dxgi_vk_swap_chain *chain,
     entry->present_count = present_count;
     entry->begin_frame_time_ns = begin_frame_time_ns;
     entry->present_timing_enabled = present_timing_enabled;
+    if (present_count)
+    {
+        /* Publish CPU completion only after the callback stops using its ring slot. */
+        vkd3d_atomic_uint64_store_explicit(&chain->present.present_count, present_count, vkd3d_memory_order_release);
+        pthread_cond_broadcast(&chain->wait_thread.present_cond);
+    }
     pthread_cond_signal(&chain->wait_thread.cond);
     pthread_mutex_unlock(&chain->wait_thread.lock);
 }
@@ -606,6 +613,7 @@ static void dxgi_vk_swap_chain_cleanup_waiter_thread(struct dxgi_vk_swap_chain *
     pthread_join(chain->wait_thread.thread, NULL);
     pthread_mutex_destroy(&chain->wait_thread.lock);
     pthread_cond_destroy(&chain->wait_thread.cond);
+    pthread_cond_destroy(&chain->wait_thread.present_cond);
     vkd3d_free(chain->wait_thread.wait_queue);
 }
 
@@ -1214,6 +1222,17 @@ static bool dxgi_vk_swap_chain_present_is_occluded(struct dxgi_vk_swap_chain *ch
 
 static void dxgi_vk_swap_chain_present_callback(void *chain);
 
+static void dxgi_vk_swap_chain_wait_for_present_count(struct dxgi_vk_swap_chain *chain, uint64_t count)
+{
+    if (vkd3d_atomic_uint64_load_explicit(&chain->present.present_count, vkd3d_memory_order_acquire) >= count)
+        return;
+
+    pthread_mutex_lock(&chain->wait_thread.lock);
+    while (vkd3d_atomic_uint64_load_explicit(&chain->present.present_count, vkd3d_memory_order_acquire) < count)
+        pthread_cond_wait(&chain->wait_thread.present_cond, &chain->wait_thread.lock);
+    pthread_mutex_unlock(&chain->wait_thread.lock);
+}
+
 static void dxgi_vk_swap_chain_wait_internal_handle(struct dxgi_vk_swap_chain *chain, bool low_latency_enable)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
@@ -1298,6 +1317,12 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChainHud 
         return DXGI_STATUS_OCCLUDED;
     if (PresentFlags & DXGI_PRESENT_TEST)
         return S_OK;
+
+    /* Low-latency pacing may let the producer run ahead. Ring ownership must
+     * remain bounded independently of the frame-latency semaphore. */
+    if (chain->user.present_count >= ARRAY_SIZE(chain->request_ring))
+        dxgi_vk_swap_chain_wait_for_present_count(chain,
+                chain->user.present_count - ARRAY_SIZE(chain->request_ring) + 1);
 
     assert(chain->user.index < chain->desc.BufferCount);
 
@@ -3694,10 +3719,6 @@ static void dxgi_vk_swap_chain_present_callback(void *chain_)
     /* Signal latency fence. */
     dxgi_vk_swap_chain_signal_waitable_handle(chain, next_present_count);
 
-    /* Signal main thread that we are done with all CPU work.
-     * No need to signal a condition variable, main thread can poll to deduce. */
-    vkd3d_atomic_uint64_store_explicit(&chain->present.present_count, next_present_count, vkd3d_memory_order_release);
-
 #ifdef VKD3D_ENABLE_BREADCRUMBS
     vkd3d_breadcrumb_tracer_update_barrier_hashes(&chain->queue->device->breadcrumb_tracer);
 #endif
@@ -4366,6 +4387,7 @@ static HRESULT dxgi_vk_swap_chain_init_waiter_thread(struct dxgi_vk_swap_chain *
             DXGI_MAX_SWAP_CHAIN_BUFFERS, sizeof(*chain->wait_thread.wait_queue));
     pthread_mutex_init(&chain->wait_thread.lock, NULL);
     pthread_cond_init(&chain->wait_thread.cond, NULL);
+    pthread_cond_init(&chain->wait_thread.present_cond, NULL);
 
     /* Have to throw a thread under the bus unfortunately.
      * That thread will only wait on present IDs and release HANDLEs as necessary. */
@@ -4373,6 +4395,7 @@ static HRESULT dxgi_vk_swap_chain_init_waiter_thread(struct dxgi_vk_swap_chain *
     {
         pthread_mutex_destroy(&chain->wait_thread.lock);
         pthread_cond_destroy(&chain->wait_thread.cond);
+        pthread_cond_destroy(&chain->wait_thread.present_cond);
         return E_OUTOFMEMORY;
     }
 
