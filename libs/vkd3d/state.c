@@ -3500,7 +3500,7 @@ static void vkd3d_report_pipeline_creation_feedback_results(const VkPipelineCrea
             else
             {
                 INFO("  Stage %u: compilation took %"PRIu64" ns.\n",
-                        i, feedback->pPipelineCreationFeedback->duration);
+                        i, feedback->pPipelineStageCreationFeedbacks[i].duration);
             }
         }
         else
