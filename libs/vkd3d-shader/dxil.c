@@ -1010,18 +1010,6 @@ static int vkd3d_dxil_converter_set_options(dxil_spv_converter converter,
     }
 
     {
-        const struct dxil_spv_option_precise_control helper =
-                { { DXIL_SPV_OPTION_PRECISE_CONTROL },
-                    (quirks & VKD3D_SHADER_QUIRK_FORCE_NOCONTRACT_MATH) ? DXIL_SPV_TRUE : DXIL_SPV_FALSE,
-                    DXIL_SPV_FALSE };
-        if (dxil_spv_converter_add_option(converter, &helper.base) != DXIL_SPV_SUCCESS)
-        {
-            WARN("dxil-spirv does not support PRECISE_CONTROL.\n");
-            return VKD3D_ERROR_NOT_IMPLEMENTED;
-        }
-    }
-
-    {
         const struct dxil_spv_option_subgroup_properties helper =
                 { { DXIL_SPV_OPTION_SUBGROUP_PROPERTIES },
                         compiler_args->min_subgroup_size,
