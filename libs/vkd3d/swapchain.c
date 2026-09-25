@@ -306,8 +306,6 @@ struct dxgi_vk_swap_chain
 
         struct vkd3d_swapchain_info pipeline;
 
-        uint32_t is_occlusion_state; /* Updated atomically. */
-
         /* State tracking in present tasks on how to deal with swapchain recreation. */
         bool force_swapchain_recreation;
         bool is_surface_lost;
@@ -1224,48 +1222,6 @@ static void dxgi_vk_swap_chain_set_hdr_metadata(struct dxgi_vk_swap_chain *chain
     VK_CALL(vkSetHdrMetadataEXT(chain->queue->device->vk_device, 1, &chain->present.vk_swapchain, &hdr_metadata));
 }
 
-#ifdef _WIN32
-static bool dxgi_vk_swap_chain_present_task_is_idle(struct dxgi_vk_swap_chain *chain)
-{
-    uint64_t presented_count = vkd3d_atomic_uint64_load_explicit(&chain->present.present_count, vkd3d_memory_order_acquire);
-    return presented_count == chain->user.present_count;
-}
-
-static bool dxgi_vk_swap_chain_is_occluded(struct dxgi_vk_swap_chain *chain)
-{
-    const struct vkd3d_vk_device_procs *vk_procs = &chain->queue->device->vk_procs;
-    VkPhysicalDevice vk_physical_device = chain->queue->device->vk_physical_device;
-    VkSurfaceCapabilitiesKHR surface_caps;
-
-    VK_CALL(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk_physical_device, chain->vk_surface, &surface_caps));
-    /* Win32 jank, when these are 0 we cannot create a swapchain. */
-    return surface_caps.maxImageExtent.width == 0 || surface_caps.maxImageExtent.height == 0;
-}
-#endif
-
-static bool dxgi_vk_swap_chain_present_is_occluded(struct dxgi_vk_swap_chain *chain)
-{
-#ifdef _WIN32
-    if (dxgi_vk_swap_chain_present_task_is_idle(chain))
-    {
-        /* Query the surface directly. */
-        chain->present.is_occlusion_state = dxgi_vk_swap_chain_is_occluded(chain);
-        return chain->present.is_occlusion_state != 0;
-    }
-    else
-    {
-        /* If presentation requests are pending it is not safe to access the surface directly
-         * without adding tons of locks everywhere,
-         * so rely on observed behavior from presentation thread. */
-        return vkd3d_atomic_uint32_load_explicit(&chain->present.is_occlusion_state, vkd3d_memory_order_relaxed) != 0;
-    }
-#else
-	/* Irrelevant on native build. */
-	(void)chain;
-	return false;
-#endif
-}
-
 static void dxgi_vk_swap_chain_present_callback(void *chain);
 
 static void dxgi_vk_swap_chain_wait_for_present_count(struct dxgi_vk_swap_chain *chain, uint64_t count)
@@ -1363,10 +1319,12 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_Present(IDXGIVkSwapChainHud 
     if (FAILED(hr = dxgi_vk_swap_chain_get_error(chain)))
         return hr;
 
-    if (dxgi_vk_swap_chain_present_is_occluded(chain))
-        return DXGI_STATUS_OCCLUDED;
     if (PresentFlags & DXGI_PRESENT_TEST)
         return S_OK;
+
+    /* D3D12 flip-model presents succeed even when the surface has zero extent.
+     * Let the present task skip WSI work while still advancing buffers and
+     * completing the GPU and frame-latency signals for this request. */
 
     /* Low-latency pacing may let the producer run ahead. Ring ownership must
      * remain bounded independently of the frame-latency semaphore. */
@@ -2506,7 +2464,6 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
     VkSurfaceFormatKHR surface_format;
     VkImageViewCreateInfo view_info;
     uint32_t override_image_count;
-    bool new_occlusion_state;
     char count_env[16];
     VkResult vr;
     uint32_t i;
@@ -2536,12 +2493,9 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
     VK_CALL(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk_physical_device, chain->vk_surface, &surface_caps));
     dxgi_vk_swap_chain_update_wait_timing_capabilities(chain);
 
-    /* Win32 quirk. Minimized windows have maximum extents of zero. */
-    new_occlusion_state = surface_caps.maxImageExtent.width == 0 || surface_caps.maxImageExtent.height == 0;
-    vkd3d_atomic_uint32_store_explicit(&chain->present.is_occlusion_state, (uint32_t)new_occlusion_state, vkd3d_memory_order_relaxed);
-
-    /* There is nothing to do. We'll do a dummy present. */
-    if (new_occlusion_state)
+    /* Minimized or suspended surfaces need no WSI image. Complete the request
+     * through the normal dummy-present path instead of rejecting the flip. */
+    if (!surface_caps.maxImageExtent.width || !surface_caps.maxImageExtent.height)
         return;
 
     /* Sanity check, this cannot happen on Win32 surfaces, but could happen on Wayland. */
