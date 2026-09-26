@@ -103,6 +103,7 @@ static const struct vkd3d_optional_extension_info optional_device_extensions[] =
 #endif
     VK_EXTENSION(KHR_INDEX_TYPE_UINT8, KHR_index_type_uint8),
     VK_EXTENSION(KHR_SHADER_FLOAT_CONTROLS_2, KHR_shader_float_controls2),
+    VK_EXTENSION(KHR_SHADER_FMA, KHR_shader_fma),
     VK_EXTENSION_COND(KHR_DYNAMIC_RENDERING_LOCAL_READ, KHR_dynamic_rendering_local_read, VKD3D_CONFIG_FLAG_STATIC(REQUIRE_INPUT_ATTACHMENTS)),
     /* EXT extensions */
     VK_EXTENSION(EXT_CONDITIONAL_RENDERING, EXT_conditional_rendering),
@@ -1785,6 +1786,12 @@ static void vkd3d_physical_device_info_init(struct vkd3d_physical_device_info *i
         vk_prepend_struct(&info->features2, &info->float_controls2_features);
     }
 
+    if (vulkan_info->KHR_shader_fma)
+    {
+        info->shader_fma_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FMA_FEATURES_KHR;
+        vk_prepend_struct(&info->features2, &info->shader_fma_features);
+    }
+
     if (vulkan_info->KHR_dynamic_rendering_local_read)
     {
         info->dynamic_rendering_local_read_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR;
@@ -2253,6 +2260,11 @@ static void vkd3d_trace_physical_device_features(const struct vkd3d_physical_dev
 
     TRACE("  VkPhysicalDeviceOpacityMicromapFeaturesKHR:\n");
     TRACE("    micromap: %#x\n", info->opacity_micromap_features.micromap);
+
+    TRACE("  VkPhysicalDeviceShaderFmaFeaturesKHR:\n");
+    TRACE("    shaderFmaFloat16: %#x\n", info->shader_fma_features.shaderFmaFloat16);
+    TRACE("    shaderFmaFloat32: %#x\n", info->shader_fma_features.shaderFmaFloat32);
+    TRACE("    shaderFmaFloat64: %#x\n", info->shader_fma_features.shaderFmaFloat64);
 }
 
 static HRESULT vkd3d_init_device_extensions(struct d3d12_device *device,
@@ -10203,6 +10215,24 @@ static void vkd3d_init_shader_extensions(struct d3d12_device *device)
     {
         device->vk_info.shader_extensions[device->vk_info.shader_extension_count++] =
                 VKD3D_SHADER_TARGET_EXTENSION_FLOAT_CONTROLS_2;
+    }
+
+    if (device->device_info.shader_fma_features.shaderFmaFloat16)
+    {
+        device->vk_info.shader_extensions[device->vk_info.shader_extension_count++] =
+                VKD3D_SHADER_TARGET_EXTENSION_SHADER_FMA_FLOAT16;
+    }
+
+    if (device->device_info.shader_fma_features.shaderFmaFloat32)
+    {
+        device->vk_info.shader_extensions[device->vk_info.shader_extension_count++] =
+                VKD3D_SHADER_TARGET_EXTENSION_SHADER_FMA_FLOAT32;
+    }
+
+    if (device->device_info.shader_fma_features.shaderFmaFloat64)
+    {
+        device->vk_info.shader_extensions[device->vk_info.shader_extension_count++] =
+                VKD3D_SHADER_TARGET_EXTENSION_SHADER_FMA_FLOAT64;
     }
 }
 

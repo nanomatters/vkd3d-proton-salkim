@@ -801,6 +801,7 @@ static int vkd3d_dxil_converter_set_options(dxil_spv_converter converter,
     dxil_spv_option_compute_shader_derivatives compute_shader_derivatives = {{ DXIL_SPV_OPTION_COMPUTE_SHADER_DERIVATIVES }};
     dxil_spv_option_denorm_preserve_support denorm_preserve = {{ DXIL_SPV_OPTION_DENORM_PRESERVE_SUPPORT }};
     dxil_spv_option_float8_support float8 = {{ DXIL_SPV_OPTION_FLOAT8_SUPPORT }};
+    dxil_spv_option_shader_fma shader_fma = {{ DXIL_SPV_OPTION_SHADER_FMA }};
     unsigned int i, j, max_tess_factor;
 
     if (!vkd3d_dxil_converter_can_use_soft_float_fp16_conv(compiler_args))
@@ -1275,6 +1276,21 @@ static int vkd3d_dxil_converter_set_options(dxil_spv_converter converter,
                     ERR("dxil-spirv does not support FLOAT_CONTROLS_2.\n");
                     return VKD3D_ERROR_NOT_IMPLEMENTED;
                 }
+            }
+            else if (compiler_args->target_extensions[i] == VKD3D_SHADER_TARGET_EXTENSION_SHADER_FMA_FLOAT16)
+                shader_fma.supported_float16 = DXIL_SPV_TRUE;
+            else if (compiler_args->target_extensions[i] == VKD3D_SHADER_TARGET_EXTENSION_SHADER_FMA_FLOAT32)
+                shader_fma.supported_float32 = DXIL_SPV_TRUE;
+            else if (compiler_args->target_extensions[i] == VKD3D_SHADER_TARGET_EXTENSION_SHADER_FMA_FLOAT64)
+                shader_fma.supported_float64 = DXIL_SPV_TRUE;
+        }
+
+        if (shader_fma.supported_float16 || shader_fma.supported_float32 || shader_fma.supported_float64)
+        {
+            if (dxil_spv_converter_add_option(converter, &shader_fma.base) != DXIL_SPV_SUCCESS)
+            {
+                ERR("dxil-spirv does not support SHADER_FMA.\n");
+                return VKD3D_ERROR_NOT_IMPLEMENTED;
             }
         }
 
