@@ -25469,13 +25469,15 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
                 cmd_count++;
             }
 
-            /* If all remaining command buffers in the set are low cost, add them as well. */
+            /* If all remaining command buffers in the set are low cost, add them as well.
+             * A fallback queue submission must still be handled separately. */
             total_cost = 0;
 
-            for (i = cmd_index + cmd_count; i < exec->cmd_count && total_cost < VKD3D_COMMAND_COST_MERGE_THRESHOLD; i++)
+            for (i = cmd_index + cmd_count; i < exec->cmd_count && total_cost < VKD3D_COMMAND_COST_MERGE_THRESHOLD &&
+                    exec->cmd[i].deviceMask == VKD3D_COMMAND_BUFFER_SUBMIT_INFO_DEVICE_MASK_DEFAULT; i++)
                 total_cost += exec->cmd_cost[i];
 
-            if (total_cost < VKD3D_COMMAND_COST_MERGE_THRESHOLD)
+            if (i == exec->cmd_count && total_cost < VKD3D_COMMAND_COST_MERGE_THRESHOLD)
                 cmd_count = exec->cmd_count - cmd_index;
         }
         else
