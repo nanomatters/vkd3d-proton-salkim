@@ -1,3 +1,4 @@
+# Modified by Erhan Bilgili for Salkim on 2026-09-01; notice added 2026-09-28.
 vkd3d_shaders =[
   'shaders/cs_clear_uav_buffer_float.comp',
   'shaders/cs_clear_uav_buffer_raw.comp',
