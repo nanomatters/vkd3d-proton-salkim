@@ -1,5 +1,11 @@
 # vkd3d-proton
 
+This is the Salkim/Wineland fork maintained by Erhan Bilgili, not an unmodified
+upstream release. Changes include shared HUD rendering, presentation and
+latency handling, resource management and shader integration. The library and
+our modifications remain under LGPL-2.1-or-later; see COPYING and LICENSE.
+This fork notice was added on 2026-09-28.
+
 vkd3d-proton is a fork of VKD3D, which aims to implement the full Direct3D 12 API on top of Vulkan.
 The project serves as the development effort for Direct3D 12 support in [Proton](https://github.com/ValveSoftware/Proton).
 

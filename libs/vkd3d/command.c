@@ -1,4 +1,8 @@
 /*
+ * Salkim modifications by Erhan Bilgili on:
+ * 2026-09-11, 2026-09-12, 2026-09-18, 2026-09-26.
+ * Modification notice added on 2026-09-28.
+ *
  * Copyright 2016 Józef Kucia for CodeWeavers
  * Copyright 2016 Henri Verbeet for CodeWeavers
  *
