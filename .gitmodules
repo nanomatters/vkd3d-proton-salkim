@@ -1,3 +1,4 @@
+# Modified by Erhan Bilgili for Salkim on 2026-09-22; notice added 2026-09-28.
 [submodule "subprojects/dxil-spirv"]
 	path = subprojects/dxil-spirv
 	url = https://github.com/nanomatters/dxil-spirv-salkim.git
