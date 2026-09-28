@@ -1,6 +1,7 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-01, 2026-09-12, 2026-09-18, 2026-09-19, 2026-09-26.
+ * 2026-09-01, 2026-09-12, 2026-09-18, 2026-09-19, 2026-09-26,
+ * 2026-09-28.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -163,7 +164,6 @@ struct vkd3d_vulkan_info
     bool KHR_opacity_micromap;
     bool KHR_index_type_uint8;
     bool KHR_shader_float_controls2;
-    bool KHR_shader_fma;
     bool KHR_dynamic_rendering_local_read;
     bool KHR_shader_untyped_pointers;
     /* EXT device extensions */
@@ -5458,7 +5458,6 @@ struct vkd3d_physical_device_info
     VkPhysicalDeviceDescriptorHeapFeaturesEXT descriptor_heap_features;
     VkPhysicalDeviceDeviceAddressCommandsFeaturesKHR device_address_commands_features;
     VkPhysicalDeviceShaderFloatControls2FeaturesKHR float_controls2_features;
-    VkPhysicalDeviceShaderFmaFeaturesKHR shader_fma_features;
     VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR dynamic_rendering_local_read_features;
     VkPhysicalDeviceBufferDeviceAddressAllocationAlignmentFeaturesVALVE buffer_device_address_allocation_alignment_features;
     VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT invocation_reorder_features;
