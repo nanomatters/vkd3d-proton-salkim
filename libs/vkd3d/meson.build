@@ -1,3 +1,4 @@
+# Modified by Erhan Bilgili for Salkim on 2026-09-01; notice added 2026-09-28.
 vkd3d_shaders =[
   'shaders/fs_empty.frag',
 
