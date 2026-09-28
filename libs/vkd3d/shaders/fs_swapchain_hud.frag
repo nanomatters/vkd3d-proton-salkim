@@ -1,4 +1,5 @@
 // Copyright 2026 Erhan Bilgili (local adaptations)
+// Salkim HUD implementation added on 2026-09-01; notice added on 2026-09-28.
 // SPDX-License-Identifier: LGPL-2.1-or-later AND Zlib
 //
 // Adapted from DXVK's hud_text_frag.frag, hud_frag_common.glsl and
