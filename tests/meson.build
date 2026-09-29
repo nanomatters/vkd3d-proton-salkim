@@ -1,10 +1,24 @@
-# Salkim modifications by Erhan Bilgili on 2026-09-01.
+# Salkim modifications by Erhan Bilgili on 2026-09-01 and 2026-09-29.
 
 vkd3d_test_flags = []
 vkd3d_test_deps = [ lib_d3d12, vkd3d_common_dep ]
 if vkd3d_platform == 'windows'
   vkd3d_test_deps += [ lib_dxgi ]
 endif
+
+prebuild_test_source = custom_target('rtas-prebuild-source',
+  input : [ 'rtas_prebuild_test.py', '../libs/vkd3d/device.c' ],
+  output : 'rtas_prebuild.c',
+  command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
+
+prebuild_test = executable('rtas-prebuild', prebuild_test_source,
+  native : true,
+  include_directories : vkd3d_external_includes,
+  c_args : meson.get_compiler('c', native : true).get_supported_arguments([
+    '-UNDEBUG', '-Wno-unused-function', '-Wno-unused-variable', '-Wno-unused-parameter' ]),
+  install : false)
+
+test('rtas-prebuild', prebuild_test, timeout : 10)
 
 d3d12_test_utils_lib = static_library('d3d12-test-utils', 'd3d12_test_utils.c',
   dependencies        : vkd3d_test_deps,
