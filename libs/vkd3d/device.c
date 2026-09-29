@@ -1,6 +1,6 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-11, 2026-09-26, 2026-09-28.
+ * 2026-09-11, 2026-09-26, 2026-09-28, 2026-09-29.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -7952,12 +7952,6 @@ static void STDMETHODCALLTYPE d3d12_device_GetRaytracingAccelerationStructurePre
         goto cleanup;
     }
 
-    if (build_info.type == VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR &&
-        VKD3D_CONFIG_FLAG_IS_SET(RTAS_ALLOW_BLAS_REBUILD_SIZES))
-    {
-        build_info.flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
-    }
-
     build_info.pGeometries = geometries;
 
     memset(&size_info, 0, sizeof(size_info));
@@ -7967,21 +7961,30 @@ static void STDMETHODCALLTYPE d3d12_device_GetRaytracingAccelerationStructurePre
             VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &build_info,
             primitive_counts, &size_info));
 
-    /* An assumption is made here where RTAS_ALLOW_REBUILD_SIZES config will not make the required RTAS size smaller. */
     info->ResultDataMaxSizeInBytes = size_info.accelerationStructureSize;
     info->ScratchDataSizeInBytes = size_info.buildScratchSize;
+    info->UpdateScratchDataSizeInBytes = size_info.updateScratchSize;
 
     if (build_info.type == VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR &&
         VKD3D_CONFIG_FLAG_IS_SET(RTAS_ALLOW_BLAS_REBUILD_SIZES))
     {
-        /* Pick the conservative result. */
-        info->ScratchDataSizeInBytes = max(size_info.buildScratchSize, size_info.updateScratchSize);
-        info->UpdateScratchDataSizeInBytes = max(size_info.buildScratchSize, size_info.updateScratchSize);
-    }
-    else
-    {
-        /* Default API path. */
-        info->UpdateScratchDataSizeInBytes = size_info.updateScratchSize;
+        if (!(build_info.flags & VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR))
+        {
+            /* ALLOW_UPDATE is not guaranteed to increase any of the reported sizes. */
+            build_info.flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+            VK_CALL(vkGetAccelerationStructureBuildSizesKHR(device->vk_device,
+                    VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &build_info,
+                    primitive_counts, &size_info));
+
+            info->ResultDataMaxSizeInBytes = max(info->ResultDataMaxSizeInBytes, size_info.accelerationStructureSize);
+            info->ScratchDataSizeInBytes = max(info->ScratchDataSizeInBytes, size_info.buildScratchSize);
+            /* Only the ALLOW_UPDATE query describes a valid update operation. */
+            info->UpdateScratchDataSizeInBytes = size_info.updateScratchSize;
+        }
+
+        /* Either path may be used for a rebuild, so reserve enough scratch for both. */
+        info->ScratchDataSizeInBytes = max(info->ScratchDataSizeInBytes, info->UpdateScratchDataSizeInBytes);
+        info->UpdateScratchDataSizeInBytes = info->ScratchDataSizeInBytes;
     }
 
     TRACE("ResultDataMaxSizeInBytes: %"PRIu64".\n", info->ResultDataMaxSizeInBytes);
