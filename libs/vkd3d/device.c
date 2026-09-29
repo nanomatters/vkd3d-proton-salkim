@@ -1,6 +1,6 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-11, 2026-09-26.
+ * 2026-09-11, 2026-09-26, 2026-09-28, 2026-09-29.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -8022,7 +8022,6 @@ static void STDMETHODCALLTYPE d3d12_device_GetRaytracingAccelerationStructurePre
             info->ScratchDataSizeInBytes = max(info->ScratchDataSizeInBytes, update_size_info.buildScratchSize);
             info->UpdateScratchDataSizeInBytes = update_size_info.updateScratchSize;
         }
-
         info->ScratchDataSizeInBytes = max(info->ScratchDataSizeInBytes, info->UpdateScratchDataSizeInBytes);
         info->UpdateScratchDataSizeInBytes = info->ScratchDataSizeInBytes;
     }
