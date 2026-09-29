@@ -1,6 +1,6 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-11, 2026-09-12, 2026-09-18, 2026-09-26.
+ * 2026-09-11, 2026-09-12, 2026-09-18, 2026-09-26, 2026-09-29.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -21434,7 +21434,6 @@ static void d3d12_command_list_build_raytracing_blas_and_tlas(struct d3d12_comma
     VkAccelerationStructureBuildRangeInfoKHR *range_infos;
     VkAccelerationStructureGeometryKHR *geometry_infos;
     VkAccelerationStructureBuildSizesInfoKHR size_info;
-    VkBuildAccelerationStructureFlagsKHR old_flags;
     VkBuildAccelerationStructureModeKHR old_mode;
     uint32_t primitive_counts_scratch[64];
     enum vkd3d_rtas_kind rtas_kind;
@@ -21497,12 +21496,14 @@ static void d3d12_command_list_build_raytracing_blas_and_tlas(struct d3d12_comma
     /* Resolve scratch hazards. Stop batching if we detect broken application pattern.
      * Observed in Witcher 3. Only do this for RTAS. No known issues with OMMs (yet ...). */
 
-    old_flags = build_info->flags;
     old_mode = build_info->mode;
 
     if (desc->Inputs.Flags & D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE)
     {
         build_info->mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        /* D3D12 allows clearing ALLOW_UPDATE on the final update, but Vulkan
+         * requires the update flags to match the source build. Retain this flag
+         * for both the size query and the actual update. */
         build_info->flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
     }
 
@@ -21514,7 +21515,6 @@ static void d3d12_command_list_build_raytracing_blas_and_tlas(struct d3d12_comma
             VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, build_info,
             primitive_counts, &size_info));
 
-    build_info->flags = old_flags;
     build_info->mode = old_mode;
 
     if (d3d12_command_list_register_rtas_scratch_range(
