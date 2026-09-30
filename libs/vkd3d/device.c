@@ -10542,6 +10542,11 @@ static void d3d12_device_reserve_internal_sparse_queue(struct d3d12_device *devi
 static HRESULT d3d12_device_init(struct d3d12_device *device,
         struct vkd3d_instance *instance, const struct vkd3d_device_create_info *create_info)
 {
+    /* Private ID3D12Object data shared with DXVK: a NUL-terminated UTF-8
+     * renderer name and build version, including the terminating byte. */
+    static const GUID renderer_version_guid =
+            {0x6af3f90b, 0x371c, 0x4260, {0x81, 0x32, 0x47, 0x79, 0x33, 0x99, 0x02, 0x77}};
+    char renderer_version[sizeof("VKD3D-SALKIM ") + sizeof(vkd3d_version) - 1];
     const struct vkd3d_vk_device_procs *vk_procs;
     HRESULT hr;
     int rc;
@@ -10602,6 +10607,11 @@ static HRESULT d3d12_device_init(struct d3d12_device *device,
 
     if (FAILED(hr = vkd3d_private_store_init(&device->private_store)))
         goto out_free_vk_resources;
+
+    snprintf(renderer_version, sizeof(renderer_version), "VKD3D-SALKIM %s", vkd3d_version);
+    if (FAILED(vkd3d_set_private_data(&device->private_store, &renderer_version_guid,
+            sizeof(renderer_version), renderer_version, NULL, NULL)))
+        WARN("Failed to publish renderer build identity.\n");
 
     if (FAILED(hr = vkd3d_memory_transfer_queue_init(&device->memory_transfers, device)))
         goto out_free_private_store;
