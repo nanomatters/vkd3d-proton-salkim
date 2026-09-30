@@ -1,6 +1,6 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-11, 2026-09-12, 2026-09-18, 2026-09-26, 2026-09-29.
+ * 2026-09-11, 2026-09-12, 2026-09-18, 2026-09-26, 2026-09-29, 2026-09-30.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -21444,23 +21444,23 @@ static void d3d12_command_list_build_raytracing_blas_and_tlas(struct d3d12_comma
 
     if (geometry_count <= ARRAY_SIZE(primitive_counts_scratch))
         primitive_counts = primitive_counts_scratch;
-    else
-        primitive_counts = vkd3d_malloc(geometry_count * sizeof(*primitive_counts));
+    else if (!(primitive_counts = vkd3d_malloc(geometry_count * sizeof(*primitive_counts))))
+        return;
 
     if (!d3d12_command_list_allocate_rtas_build_info(list, geometry_count,
             &build_info, &geometry_infos, &omm_triangles_infos, &range_infos))
-        return;
+        goto cleanup;
 
     if (!vkd3d_acceleration_structure_convert_inputs(list->device, &desc->Inputs,
             build_info, geometry_infos, omm_triangles_infos, range_infos, primitive_counts))
     {
         ERR("Failed to convert inputs.\n");
-        return;
+        goto cleanup;
     }
 
     if (!vkd3d_acceleration_structure_resolve_omm_va_maps(list->device, &desc->Inputs,
             omm_triangles_infos))
-        return;
+        goto cleanup;
 
     rtas_kind = (desc->Inputs.Type == D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL) ?
         VKD3D_RTAS_KIND_TLAS : VKD3D_RTAS_KIND_NON_TLAS;
@@ -21473,7 +21473,7 @@ static void d3d12_command_list_build_raytracing_blas_and_tlas(struct d3d12_comma
         if (build_info->dstAccelerationStructure == VK_NULL_HANDLE)
         {
             ERR("Failed to place destAccelerationStructure. Dropping call.\n");
-            return;
+            goto cleanup;
         }
     }
 
@@ -21486,7 +21486,7 @@ static void d3d12_command_list_build_raytracing_blas_and_tlas(struct d3d12_comma
         if (build_info->srcAccelerationStructure == VK_NULL_HANDLE)
         {
             ERR("Failed to place srcAccelerationStructure. Dropping call.\n");
-            return;
+            goto cleanup;
         }
     }
 
@@ -21525,7 +21525,7 @@ static void d3d12_command_list_build_raytracing_blas_and_tlas(struct d3d12_comma
         /* The batch is restarted, need to rebuild. */
         d3d12_command_list_flush_rtas_barrier(list);
         d3d12_command_list_build_raytracing_blas_and_tlas(list, desc, num_postbuild_info_descs, postbuild_info_descs);
-        return;
+        goto cleanup;
     }
 
 #ifdef VKD3D_ENABLE_BREADCRUMBS
@@ -21589,9 +21589,6 @@ static void d3d12_command_list_build_raytracing_blas_and_tlas(struct d3d12_comma
     }
 #endif
 
-    if (primitive_counts != primitive_counts_scratch)
-        vkd3d_free(primitive_counts);
-
     if (num_postbuild_info_descs)
     {
         uint32_t i;
@@ -21613,6 +21610,10 @@ static void d3d12_command_list_build_raytracing_blas_and_tlas(struct d3d12_comma
             info->rtas_kind = rtas_kind;
         }
     }
+
+cleanup:
+    if (primitive_counts != primitive_counts_scratch)
+        vkd3d_free(primitive_counts);
 }
 
 static void STDMETHODCALLTYPE d3d12_command_list_BuildRaytracingAccelerationStructure(d3d12_command_list_iface *iface,
