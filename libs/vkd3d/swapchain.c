@@ -2746,7 +2746,7 @@ static VkResult dxgi_vk_swap_chain_present_signal_blit_semaphore(struct dxgi_vk_
     if (vr != VK_SUCCESS)
     {
         ERR("Failed to submit present completion, vr = %d.\n", vr);
-        VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST);
+        VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST, vr);
         return vr;
     }
 
