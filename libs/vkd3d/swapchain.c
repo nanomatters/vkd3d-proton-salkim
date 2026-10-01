@@ -1,7 +1,7 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
  * 2026-09-01, 2026-09-02, 2026-09-10, 2026-09-11, 2026-09-18,
- * 2026-09-19, 2026-09-25.
+ * 2026-09-19, 2026-09-25, 2026-10-01.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2022 Hans-Kristian Arntzen for Valve Corporation
@@ -2745,7 +2745,7 @@ static VkResult dxgi_vk_swap_chain_present_signal_blit_semaphore(struct dxgi_vk_
     if (vr != VK_SUCCESS)
     {
         ERR("Failed to submit present completion, vr = %d.\n", vr);
-        VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST);
+        VKD3D_DEVICE_REPORT_FAULT_AND_BREADCRUMB_IF(chain->queue->device, vr == VK_ERROR_DEVICE_LOST, vr);
         return vr;
     }
 
