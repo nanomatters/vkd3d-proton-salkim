@@ -1,6 +1,6 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-26.
+ * 2026-09-26, 2026-10-03.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2017-2019 Józef Kucia for CodeWeavers
@@ -455,6 +455,7 @@ enum vkd3d_shader_target_extension
     VKD3D_SHADER_TARGET_EXTENSION_SHADER_FMA_FLOAT16,
     VKD3D_SHADER_TARGET_EXTENSION_SHADER_FMA_FLOAT32,
     VKD3D_SHADER_TARGET_EXTENSION_SHADER_FMA_FLOAT64,
+    VKD3D_SHADER_TARGET_EXTENSION_NV_LINEAR_SWEPT_SPHERES,
     VKD3D_SHADER_TARGET_EXTENSION_COUNT,
 };
 
