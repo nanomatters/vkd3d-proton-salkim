@@ -1,6 +1,7 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-01, 2026-09-12, 2026-09-18, 2026-09-19, 2026-09-26.
+ * 2026-09-01, 2026-09-12, 2026-09-18, 2026-09-19, 2026-09-26,
+ * 2026-10-03.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -228,6 +229,7 @@ struct vkd3d_vulkan_info
     bool NV_raw_access_chains;
     bool NV_cooperative_matrix2;
     bool NV_ray_tracing_invocation_reorder;
+    bool NV_ray_tracing_linear_swept_spheres;
     bool NV_shader_atomic_float16_vector;
     /* VALVE extensions */
     bool VALVE_mutable_descriptor_type;
@@ -5458,6 +5460,7 @@ struct vkd3d_physical_device_info
     VkPhysicalDevicePresentWait2FeaturesKHR present_wait2_features;
     VkPhysicalDevicePresentTimingFeaturesEXT present_timing_features;
     VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV ray_tracing_invocation_reorder_features_nv;
+    VkPhysicalDeviceRayTracingLinearSweptSpheresFeaturesNV linear_swept_spheres_features_nv;
     VkPhysicalDeviceDescriptorHeapFeaturesEXT descriptor_heap_features;
     VkPhysicalDeviceDeviceAddressCommandsFeaturesKHR device_address_commands_features;
     VkPhysicalDeviceShaderFloatControls2FeaturesKHR float_controls2_features;
