@@ -1,6 +1,6 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-01, 2026-09-19.
+ * 2026-09-01, 2026-09-19, 2026-10-03.
  * Modification notice added on 2026-09-28.
  *
  * * Copyright 2021 NVIDIA Corporation
@@ -775,34 +775,41 @@ static BOOL STDMETHODCALLTYPE d3d12_device_vkd3d_ext_IsNvShaderExtnOpCodeSupport
             return device->device_info.ray_tracing_position_fetch_features.rayTracingPositionFetch ? TRUE : FALSE;
 
         case NV_EXTN_OP_RT_SPHERE_OBJECT_POSITION_AND_RADIUS:
+        case NV_EXTN_OP_RT_IS_SPHERE_HIT:
+            return lss_features->spheres && device->device_info.ray_tracing_pipeline_features.rayTracingPipeline;
+
         case NV_EXTN_OP_RT_CANDIDATE_SPHERE_OBJECT_POSITION_AND_RADIUS:
         case NV_EXTN_OP_RT_COMMITTED_SPHERE_OBJECT_POSITION_AND_RADIUS:
-        case NV_EXTN_OP_RT_IS_SPHERE_HIT:
         case NV_EXTN_OP_RT_CANDIDATE_IS_NONOPAQUE_SPHERE:
         case NV_EXTN_OP_RT_COMMITTED_IS_SPHERE:
-            return lss_features->spheres ? TRUE : FALSE;
+            return lss_features->spheres && device->device_info.ray_query_features.rayQuery;
 
         case NV_EXTN_OP_RT_LSS_OBJECT_POSITIONS_AND_RADII:
+        case NV_EXTN_OP_RT_IS_LSS_HIT:
+            return lss_features->linearSweptSpheres && device->device_info.ray_tracing_pipeline_features.rayTracingPipeline;
+
         case NV_EXTN_OP_RT_CANDIDATE_LSS_OBJECT_POSITIONS_AND_RADII:
         case NV_EXTN_OP_RT_COMMITTED_LSS_OBJECT_POSITIONS_AND_RADII:
-        case NV_EXTN_OP_RT_IS_LSS_HIT:
         case NV_EXTN_OP_RT_CANDIDATE_IS_NONOPAQUE_LSS:
         case NV_EXTN_OP_RT_COMMITTED_IS_LSS:
         case NV_EXTN_OP_RT_CANDIDATE_LSS_HIT_PARAMETER:
         case NV_EXTN_OP_RT_COMMITTED_LSS_HIT_PARAMETER:
-            return lss_features->linearSweptSpheres ? TRUE : FALSE;
+            return lss_features->linearSweptSpheres && device->device_info.ray_query_features.rayQuery;
 
         case NV_EXTN_OP_HIT_OBJECT_GET_SPHERE_OBJECT_POSITION_AND_RADIUS:
         case NV_EXTN_OP_HIT_OBJECT_IS_SPHERE_HIT:
-            return lss_features->spheres && ser_features->rayTracingInvocationReorder ? TRUE : FALSE;
+            return lss_features->spheres && ser_features->rayTracingInvocationReorder &&
+                    device->device_info.ray_tracing_pipeline_features.rayTracingPipeline;
 
         case NV_EXTN_OP_HIT_OBJECT_GET_LSS_OBJECT_POSITIONS_AND_RADII:
         case NV_EXTN_OP_HIT_OBJECT_IS_LSS_HIT:
-            return lss_features->linearSweptSpheres && ser_features->rayTracingInvocationReorder ? TRUE : FALSE;
+            return lss_features->linearSweptSpheres && ser_features->rayTracingInvocationReorder &&
+                    device->device_info.ray_tracing_pipeline_features.rayTracingPipeline;
 
         case NV_EXTN_OP_RT_CANDIDATE_BUILTIN_PRIMITIVE_RAY_T:
         case NV_EXTN_OP_RT_COMMIT_NONOPAQUE_BUILTIN_PRIMITIVE_HIT:
-            return lss_features->spheres || lss_features->linearSweptSpheres ? TRUE : FALSE;
+            return (lss_features->spheres || lss_features->linearSweptSpheres) &&
+                    device->device_info.ray_query_features.rayQuery;
 
         default:
             return FALSE;

@@ -20,6 +20,18 @@ prebuild_test = executable('rtas-prebuild', prebuild_test_source,
 
 test('rtas-prebuild', prebuild_test, timeout : 10)
 
+nv_shader_opcodes_source = custom_target('nv-shader-opcodes-source',
+  input : [ 'test_nv_shader_opcodes.py', '../libs/vkd3d/device_vkd3d_ext.c', 'd3d12_raytracing.c' ],
+  output : 'nv_shader_opcodes.c',
+  command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
+
+nv_shader_opcodes_test = executable('nv-shader-opcodes', nv_shader_opcodes_source,
+  native : true,
+  include_directories : vkd3d_private_includes,
+  install : false)
+
+test('nv-shader-opcodes', nv_shader_opcodes_test, timeout : 10)
+
 d3d12_test_utils_lib = static_library('d3d12-test-utils', 'd3d12_test_utils.c',
   dependencies        : vkd3d_test_deps,
   include_directories : vkd3d_private_includes)

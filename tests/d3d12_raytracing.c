@@ -1,5 +1,5 @@
 /*
- * Salkim modifications by Erhan Bilgili on 2026-09-29.
+ * Salkim modifications by Erhan Bilgili on 2026-09-29 and 2026-10-03.
  * Modification notice added on 2026-10-10.
  *
  * Copyright 2016-2017 Józef Kucia for CodeWeavers
@@ -24,6 +24,7 @@
 
 #define VKD3D_DBG_CHANNEL VKD3D_DBG_CHANNEL_API
 #include "d3d12_crosstest.h"
+#include "nvShaderExtnEnums.h"
 
 struct raytracing_test_context
 {
@@ -31,6 +32,119 @@ struct raytracing_test_context
     ID3D12Device5 *device5;
     ID3D12GraphicsCommandList4 *list4;
 };
+
+void test_raytracing_lss_shader_opcode_support(void)
+{
+    enum
+    {
+        SPHERES = 1u << 0,
+        LSS = 1u << 1,
+        PIPELINE = 1u << 2,
+        QUERY = 1u << 3,
+        SER = 1u << 4,
+        ANY_GEOMETRY = 1u << 5,
+    };
+    static const struct
+    {
+        unsigned int opcode, requirements;
+    }
+    tests[] =
+    {
+        {NV_EXTN_OP_RT_SPHERE_OBJECT_POSITION_AND_RADIUS, SPHERES | PIPELINE},
+        {NV_EXTN_OP_RT_CANDIDATE_SPHERE_OBJECT_POSITION_AND_RADIUS, SPHERES | QUERY},
+        {NV_EXTN_OP_RT_COMMITTED_SPHERE_OBJECT_POSITION_AND_RADIUS, SPHERES | QUERY},
+        {NV_EXTN_OP_HIT_OBJECT_GET_SPHERE_OBJECT_POSITION_AND_RADIUS, SPHERES | PIPELINE | SER},
+        {NV_EXTN_OP_RT_LSS_OBJECT_POSITIONS_AND_RADII, LSS | PIPELINE},
+        {NV_EXTN_OP_RT_CANDIDATE_LSS_OBJECT_POSITIONS_AND_RADII, LSS | QUERY},
+        {NV_EXTN_OP_RT_COMMITTED_LSS_OBJECT_POSITIONS_AND_RADII, LSS | QUERY},
+        {NV_EXTN_OP_HIT_OBJECT_GET_LSS_OBJECT_POSITIONS_AND_RADII, LSS | PIPELINE | SER},
+        {NV_EXTN_OP_RT_IS_SPHERE_HIT, SPHERES | PIPELINE},
+        {NV_EXTN_OP_RT_CANDIDATE_IS_NONOPAQUE_SPHERE, SPHERES | QUERY},
+        {NV_EXTN_OP_RT_COMMITTED_IS_SPHERE, SPHERES | QUERY},
+        {NV_EXTN_OP_HIT_OBJECT_IS_SPHERE_HIT, SPHERES | PIPELINE | SER},
+        {NV_EXTN_OP_RT_IS_LSS_HIT, LSS | PIPELINE},
+        {NV_EXTN_OP_RT_CANDIDATE_IS_NONOPAQUE_LSS, LSS | QUERY},
+        {NV_EXTN_OP_RT_COMMITTED_IS_LSS, LSS | QUERY},
+        {NV_EXTN_OP_HIT_OBJECT_IS_LSS_HIT, LSS | PIPELINE | SER},
+        {NV_EXTN_OP_RT_CANDIDATE_LSS_HIT_PARAMETER, LSS | QUERY},
+        {NV_EXTN_OP_RT_COMMITTED_LSS_HIT_PARAMETER, LSS | QUERY},
+        {NV_EXTN_OP_RT_CANDIDATE_BUILTIN_PRIMITIVE_RAY_T, ANY_GEOMETRY | QUERY},
+        {NV_EXTN_OP_RT_COMMIT_NONOPAQUE_BUILTIN_PRIMITIVE_HIT, ANY_GEOMETRY | QUERY},
+    };
+    VkPhysicalDeviceRayTracingLinearSweptSpheresFeaturesNV lss;
+    VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV ser;
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR pipeline;
+    VkPhysicalDeviceRayQueryFeaturesKHR query;
+    struct test_context context;
+    unsigned int supported = 0, i;
+    ID3D12DeviceExt4 *ext;
+    bool expected;
+    HRESULT hr;
+
+    if (!init_compute_test_context(&context))
+        return;
+
+    hr = ID3D12Device_QueryInterface(context.device, &IID_ID3D12DeviceExt4, (void **)&ext);
+    if (FAILED(hr))
+    {
+        skip("ID3D12DeviceExt4 is not supported.\n");
+        destroy_test_context(&context);
+        return;
+    }
+
+    memset(&lss, 0, sizeof(lss));
+    memset(&pipeline, 0, sizeof(pipeline));
+    memset(&query, 0, sizeof(query));
+    memset(&ser, 0, sizeof(ser));
+    lss.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_LINEAR_SWEPT_SPHERES_FEATURES_NV;
+    pipeline.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+    query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    ser.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV;
+    lss.pNext = &pipeline;
+    pipeline.pNext = &query;
+    query.pNext = &ser;
+
+    if (!get_driver_vk_features(context.device, &lss))
+    {
+        skip("Cannot query Vulkan features.\n");
+        ID3D12DeviceExt4_Release(ext);
+        destroy_test_context(&context);
+        return;
+    }
+
+    /* Physical features alone do not account for disabled device extensions. */
+    if (is_vk_device_extension_supported(context.device, VK_NV_RAY_TRACING_LINEAR_SWEPT_SPHERES_EXTENSION_NAME))
+    {
+        if (lss.spheres)
+            supported |= SPHERES;
+        if (lss.linearSweptSpheres)
+            supported |= LSS;
+    }
+    if (pipeline.rayTracingPipeline &&
+            is_vk_device_extension_supported(context.device, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME))
+        supported |= PIPELINE;
+    if (query.rayQuery &&
+            is_vk_device_extension_supported(context.device, VK_KHR_RAY_QUERY_EXTENSION_NAME))
+        supported |= QUERY;
+    if (ser.rayTracingInvocationReorder &&
+            is_vk_device_extension_supported(context.device, VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME))
+        supported |= SER;
+    if (supported & (SPHERES | LSS))
+        supported |= ANY_GEOMETRY;
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        expected = (supported & tests[i].requirements) == tests[i].requirements;
+        ok(!!ID3D12DeviceExt4_IsNvShaderExtnOpCodeSupported(ext, tests[i].opcode) == expected,
+                "Unexpected support for opcode %u with capabilities %#x, expected %u.\n",
+                tests[i].opcode, supported, expected);
+    }
+    ok(!ID3D12DeviceExt4_IsNvShaderExtnOpCodeSupported(ext, UINT32_MAX),
+            "Invalid NVAPI opcode was advertised.\n");
+
+    ID3D12DeviceExt4_Release(ext);
+    destroy_test_context(&context);
+}
 
 static void destroy_raytracing_test_context(struct raytracing_test_context *context)
 {
