@@ -21,6 +21,7 @@
 
 #define VKD3D_DBG_CHANNEL VKD3D_DBG_CHANNEL_API
 #include "d3d12_crosstest.h"
+#include "nvShaderExtnEnums.h"
 
 struct raytracing_test_context
 {
@@ -28,6 +29,79 @@ struct raytracing_test_context
     ID3D12Device5 *device5;
     ID3D12GraphicsCommandList4 *list4;
 };
+
+void test_raytracing_lss_shader_opcode_support(void)
+{
+    static const unsigned int unsupported_opcodes[] =
+    {
+        NV_EXTN_OP_RT_SPHERE_OBJECT_POSITION_AND_RADIUS,
+        NV_EXTN_OP_RT_CANDIDATE_LSS_OBJECT_POSITIONS_AND_RADII,
+        NV_EXTN_OP_HIT_OBJECT_GET_LSS_OBJECT_POSITIONS_AND_RADII,
+        NV_EXTN_OP_RT_IS_LSS_HIT,
+        NV_EXTN_OP_RT_CANDIDATE_IS_NONOPAQUE_LSS,
+        NV_EXTN_OP_HIT_OBJECT_IS_LSS_HIT,
+        NV_EXTN_OP_RT_CANDIDATE_LSS_HIT_PARAMETER,
+        NV_EXTN_OP_RT_COMMITTED_LSS_HIT_PARAMETER,
+    };
+    VkPhysicalDeviceRayTracingLinearSweptSpheresFeaturesNV lss;
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR pipeline;
+    VkPhysicalDeviceRayQueryFeaturesKHR query;
+    struct test_context context;
+    bool expected, query_expected;
+    ID3D12DeviceExt4 *ext;
+    unsigned int i;
+    HRESULT hr;
+
+    if (!init_compute_test_context(&context))
+        return;
+
+    hr = ID3D12Device_QueryInterface(context.device, &IID_ID3D12DeviceExt4, (void **)&ext);
+    if (FAILED(hr))
+    {
+        skip("ID3D12DeviceExt4 is not supported.\n");
+        destroy_test_context(&context);
+        return;
+    }
+
+    memset(&lss, 0, sizeof(lss));
+    memset(&pipeline, 0, sizeof(pipeline));
+    memset(&query, 0, sizeof(query));
+    lss.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_LINEAR_SWEPT_SPHERES_FEATURES_NV;
+    pipeline.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+    query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    lss.pNext = &pipeline;
+    pipeline.pNext = &query;
+
+    if (!get_driver_vk_features(context.device, &lss))
+    {
+        skip("Cannot query Vulkan features.\n");
+        ID3D12DeviceExt4_Release(ext);
+        destroy_test_context(&context);
+        return;
+    }
+
+    expected = lss.linearSweptSpheres && pipeline.rayTracingPipeline &&
+            is_vk_device_extension_supported(context.device, VK_NV_RAY_TRACING_LINEAR_SWEPT_SPHERES_EXTENSION_NAME);
+    query_expected = expected && query.rayQuery &&
+            is_vk_device_extension_supported(context.device, VK_KHR_RAY_QUERY_EXTENSION_NAME);
+
+    ok(!!ID3D12DeviceExt4_IsNvShaderExtnOpCodeSupported(ext,
+            NV_EXTN_OP_RT_LSS_OBJECT_POSITIONS_AND_RADII) == expected,
+            "Unexpected LSS hit-query support, expected %u.\n", expected);
+    ok(!!ID3D12DeviceExt4_IsNvShaderExtnOpCodeSupported(ext,
+            NV_EXTN_OP_RT_COMMITTED_LSS_OBJECT_POSITIONS_AND_RADII) == query_expected,
+            "Unexpected committed LSS position-query support, expected %u.\n", query_expected);
+    ok(!!ID3D12DeviceExt4_IsNvShaderExtnOpCodeSupported(ext,
+            NV_EXTN_OP_RT_COMMITTED_IS_LSS) == query_expected,
+            "Unexpected committed LSS intersection-query support, expected %u.\n", query_expected);
+
+    for (i = 0; i < ARRAY_SIZE(unsupported_opcodes); i++)
+        ok(!ID3D12DeviceExt4_IsNvShaderExtnOpCodeSupported(ext, unsupported_opcodes[i]),
+                "Unimplemented LSS/sphere opcode %u was advertised.\n", unsupported_opcodes[i]);
+
+    ID3D12DeviceExt4_Release(ext);
+    destroy_test_context(&context);
+}
 
 static void destroy_raytracing_test_context(struct raytracing_test_context *context)
 {
