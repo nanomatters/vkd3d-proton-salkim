@@ -1,4 +1,6 @@
 /*
+ * Salkim modifications by Erhan Bilgili on 2026-10-03.
+ *
  * Copyright 2016-2017 Józef Kucia for CodeWeavers
  * Copyright 2020-2021 Hans-Kristian Arntzen for Valve Corporation
  *
@@ -395,6 +397,7 @@ decl_test(test_raytracing_null_rtas);
 decl_test(test_raytracing_opacity_micro_map);
 decl_test(test_raytracing_opacity_micro_map_ray_query);
 decl_test(test_raytracing_huge_dispatch);
+decl_test(test_raytracing_lss_shader_opcode_support);
 decl_test(test_fence_wait_robustness);
 decl_test(test_fence_wait_robustness_shared);
 decl_test(test_fence_wait_multiple);

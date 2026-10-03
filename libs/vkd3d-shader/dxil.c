@@ -1,6 +1,6 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-22, 2026-09-26.
+ * 2026-09-22, 2026-09-26, 2026-10-03.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2020 Hans-Kristian Arntzen for Valve Corporation
@@ -1311,6 +1311,18 @@ static int vkd3d_dxil_converter_set_options(dxil_spv_converter converter,
                 shader_fma.supported_float32 = DXIL_SPV_TRUE;
             else if (compiler_args->target_extensions[i] == VKD3D_SHADER_TARGET_EXTENSION_SHADER_FMA_FLOAT64)
                 shader_fma.supported_float64 = DXIL_SPV_TRUE;
+            else if (compiler_args->target_extensions[i] == VKD3D_SHADER_TARGET_EXTENSION_NV_LINEAR_SWEPT_SPHERES)
+            {
+                static const dxil_spv_option_ray_tracing_linear_swept_spheres lss = {
+                    { DXIL_SPV_OPTION_RAY_TRACING_LINEAR_SWEPT_SPHERES }, DXIL_SPV_TRUE,
+                };
+
+                if (dxil_spv_converter_add_option(converter, &lss.base) != DXIL_SPV_SUCCESS)
+                {
+                    ERR("dxil-spirv does not support RAY_TRACING_LINEAR_SWEPT_SPHERES.\n");
+                    return VKD3D_ERROR_NOT_IMPLEMENTED;
+                }
+            }
         }
 
         if (shader_fma.supported_float16 || shader_fma.supported_float32 || shader_fma.supported_float64)

@@ -1,6 +1,6 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-11, 2026-09-26, 2026-09-30.
+ * 2026-09-11, 2026-09-26, 2026-09-30, 2026-10-03.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -170,6 +170,7 @@ static const struct vkd3d_optional_extension_info optional_device_extensions[] =
     VK_EXTENSION(NV_RAW_ACCESS_CHAINS, NV_raw_access_chains),
     VK_EXTENSION(NV_COOPERATIVE_MATRIX_2, NV_cooperative_matrix2),
     VK_EXTENSION_DISABLE_COND(NV_RAY_TRACING_INVOCATION_REORDER, NV_ray_tracing_invocation_reorder, VKD3D_CONFIG_FLAG_STATIC(NO_DXR)),
+    VK_EXTENSION_DISABLE_COND(NV_RAY_TRACING_LINEAR_SWEPT_SPHERES, NV_ray_tracing_linear_swept_spheres, VKD3D_CONFIG_FLAG_STATIC(NO_DXR)),
     VK_EXTENSION(NV_SHADER_ATOMIC_FLOAT16_VECTOR, NV_shader_atomic_float16_vector),
     /* VALVE extensions */
     VK_EXTENSION(VALVE_MUTABLE_DESCRIPTOR_TYPE, VALVE_mutable_descriptor_type),
@@ -1797,6 +1798,12 @@ static void vkd3d_physical_device_info_init(struct vkd3d_physical_device_info *i
         vk_prepend_struct(&info->features2, &info->ray_tracing_invocation_reorder_features_nv);
     }
 
+    if (vulkan_info->NV_ray_tracing_linear_swept_spheres)
+    {
+        info->linear_swept_spheres_features_nv.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_LINEAR_SWEPT_SPHERES_FEATURES_NV;
+        vk_prepend_struct(&info->features2, &info->linear_swept_spheres_features_nv);
+    }
+
     if (vulkan_info->EXT_descriptor_heap)
     {
         info->descriptor_heap_features.sType =
@@ -2292,6 +2299,9 @@ static void vkd3d_trace_physical_device_features(const struct vkd3d_physical_dev
     TRACE("    shaderFmaFloat16: %#x\n", info->shader_fma_features.shaderFmaFloat16);
     TRACE("    shaderFmaFloat32: %#x\n", info->shader_fma_features.shaderFmaFloat32);
     TRACE("    shaderFmaFloat64: %#x\n", info->shader_fma_features.shaderFmaFloat64);
+
+    TRACE("  VkPhysicalDeviceRayTracingLinearSweptSpheresFeaturesNV:\n");
+    TRACE("    linearSweptSpheres: %#x\n", info->linear_swept_spheres_features_nv.linearSweptSpheres);
 }
 
 static HRESULT vkd3d_init_device_extensions(struct d3d12_device *device,
@@ -2336,6 +2346,10 @@ static HRESULT vkd3d_init_device_extensions(struct d3d12_device *device,
 
     if (get_spec_version(vk_extensions, count, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME) < 3)
         vulkan_info->EXT_vertex_attribute_divisor = false;
+
+    if (!vulkan_info->KHR_ray_tracing_pipeline || !vulkan_info->KHR_acceleration_structure ||
+            !vulkan_info->KHR_deferred_host_operations)
+        vulkan_info->NV_ray_tracing_linear_swept_spheres = false;
 
     vulkan_info->supports_cubin_64bit = vulkan_info->NVX_binary_import && vulkan_info->NVX_image_view_handle &&
             get_spec_version(vk_extensions, count, VK_NVX_BINARY_IMPORT_EXTENSION_NAME) >= 2 &&
@@ -2603,6 +2617,8 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
     acceleration_structure->accelerationStructureIndirectBuild = VK_FALSE;
     physical_device_info->ray_tracing_pipeline_features.rayTracingPipelineShaderGroupHandleCaptureReplay = VK_FALSE;
     physical_device_info->ray_tracing_pipeline_features.rayTracingPipelineShaderGroupHandleCaptureReplayMixed = VK_FALSE;
+    /* Only LSS shader queries are supported, not sphere/LSS geometry builds. */
+    physical_device_info->linear_swept_spheres_features_nv.spheres = VK_FALSE;
 
     line_rasterization = &physical_device_info->line_rasterization_features;
     line_rasterization->bresenhamLines = VK_FALSE;
@@ -10300,6 +10316,12 @@ static void vkd3d_init_shader_extensions(struct d3d12_device *device)
     {
         device->vk_info.shader_extensions[device->vk_info.shader_extension_count++] =
                 VKD3D_SHADER_TARGET_EXTENSION_SHADER_FMA_FLOAT64;
+    }
+
+    if (device->device_info.linear_swept_spheres_features_nv.linearSweptSpheres)
+    {
+        device->vk_info.shader_extensions[device->vk_info.shader_extension_count++] =
+                VKD3D_SHADER_TARGET_EXTENSION_NV_LINEAR_SWEPT_SPHERES;
     }
 }
 
