@@ -1,6 +1,6 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-01, 2026-09-19, 2026-10-03.
+ * 2026-09-01, 2026-09-19, 2026-10-03, 2026-10-04.
  * Modification notice added on 2026-09-28.
  *
  * * Copyright 2021 NVIDIA Corporation
@@ -1207,7 +1207,7 @@ void d3d12_device_notify_vk_swapchain_creation(struct d3d12_device *device, stru
     if (device->swapchain_info.low_latency_swapchain && device->swapchain_info.low_latency_swapchain != chain)
     {
         /* Hard evidence of multiple swapchains being in flight. */
-        dxgi_vk_swap_chain_set_latency_sleep_mode(chain, false, false, 0);
+        dxgi_vk_swap_chain_set_latency_sleep_mode(device->swapchain_info.low_latency_swapchain, false, false, 0);
         dxgi_vk_swap_chain_decref(device->swapchain_info.low_latency_swapchain);
         WARN("Multiple swapchains are in-flight. LL2 will be disabled until the situation stabilizes.\n");
         device->swapchain_info.low_latency_swapchain = NULL;
