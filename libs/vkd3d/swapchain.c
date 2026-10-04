@@ -323,7 +323,8 @@ struct dxgi_vk_swap_chain
         uint32_t low_latency_present_mode_count;
         VkPresentModeKHR low_latency_present_modes[16];
 
-        pthread_mutex_t low_latency_swapchain_lock;
+        rwlock_t low_latency_swapchain_lock;
+        pthread_mutex_t low_latency_sleep_lock;
         pthread_mutex_t low_latency_state_update_lock;
 
         VkSemaphore low_latency_sem;
@@ -642,7 +643,8 @@ static void dxgi_vk_swap_chain_cleanup_low_latency(struct dxgi_vk_swap_chain *ch
     if (chain->queue->device->vk_info.NV_low_latency2)
     {
         VK_CALL(vkDestroySemaphore(chain->queue->device->vk_device, chain->present.low_latency_sem, NULL));
-        pthread_mutex_destroy(&chain->present.low_latency_swapchain_lock);
+        rwlock_destroy(&chain->present.low_latency_swapchain_lock);
+        pthread_mutex_destroy(&chain->present.low_latency_sleep_lock);
         pthread_mutex_destroy(&chain->present.low_latency_state_update_lock);
     }
 }
@@ -1982,7 +1984,7 @@ static void dxgi_vk_swap_chain_destroy_swapchain_in_present_task(struct dxgi_vk_
      * take the low latency lock. This ensures none of the other NV low latency functions
      * will attempt to use the stale swapchain handle. */
     if (chain->queue->device->vk_info.NV_low_latency2)
-        pthread_mutex_lock(&chain->present.low_latency_swapchain_lock);
+        rwlock_lock_write(&chain->present.low_latency_swapchain_lock);
 
     if (chain->swapchain_maintenance1)
     {
@@ -2032,7 +2034,7 @@ static void dxgi_vk_swap_chain_destroy_swapchain_in_present_task(struct dxgi_vk_
     spinlock_release(&chain->present_telemetry.lock);
 
     if (chain->queue->device->vk_info.NV_low_latency2)
-        pthread_mutex_unlock(&chain->present.low_latency_swapchain_lock);
+        rwlock_unlock_write(&chain->present.low_latency_swapchain_lock);
 }
 
 static VkColorSpaceKHR convert_color_space(DXGI_COLOR_SPACE_TYPE dxgi_color_space)
@@ -2617,7 +2619,7 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
     }
 
     if (chain->queue->device->vk_info.NV_low_latency2)
-        pthread_mutex_lock(&chain->present.low_latency_swapchain_lock);
+        rwlock_lock_write(&chain->present.low_latency_swapchain_lock);
 
     if (chain->present.wait2)
         swapchain_create_info.flags |= VK_SWAPCHAIN_CREATE_PRESENT_ID_2_BIT_KHR | VK_SWAPCHAIN_CREATE_PRESENT_WAIT_2_BIT_KHR;
@@ -2630,7 +2632,7 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
         ERR("Failed to create swapchain, vr %d.\n", vr);
         chain->present.vk_swapchain = VK_NULL_HANDLE;
         if (chain->queue->device->vk_info.NV_low_latency2)
-            pthread_mutex_unlock(&chain->present.low_latency_swapchain_lock);
+            rwlock_unlock_write(&chain->present.low_latency_swapchain_lock);
         return;
     }
 
@@ -2665,7 +2667,7 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
     if (chain->queue->device->vk_info.NV_low_latency2)
     {
         dxgi_vk_swap_chain_set_low_latency_state(chain, &chain->present.low_latency_state);
-        pthread_mutex_unlock(&chain->present.low_latency_swapchain_lock);
+        rwlock_unlock_write(&chain->present.low_latency_swapchain_lock);
     }
 
     chain->present.backbuffer_count = ARRAY_SIZE(chain->present.vk_backbuffer_images);
@@ -4526,7 +4528,8 @@ static HRESULT dxgi_vk_swap_chain_init_low_latency(struct dxgi_vk_swap_chain *ch
             return hresult_from_vk_result(vr);
         }
 
-        pthread_mutex_init(&chain->present.low_latency_swapchain_lock, NULL);
+        rwlock_init(&chain->present.low_latency_swapchain_lock);
+        pthread_mutex_init(&chain->present.low_latency_sleep_lock, NULL);
         pthread_mutex_init(&chain->present.low_latency_state_update_lock, NULL);
     }
 
@@ -4709,6 +4712,9 @@ HRESULT dxgi_vk_swap_chain_latency_sleep(struct dxgi_vk_swap_chain *chain)
     bool should_sleep = false;
     VkResult vr = VK_SUCCESS;
 
+    /* Serialize sleep requests without blocking markers on the lifetime guard. */
+    pthread_mutex_lock(&chain->present.low_latency_sleep_lock);
+
     /* Increment the low latency sem value before the wait */
     chain->present.low_latency_sem_value++;
 
@@ -4718,7 +4724,7 @@ HRESULT dxgi_vk_swap_chain_latency_sleep(struct dxgi_vk_swap_chain *chain)
     latency_sleep_info.signalSemaphore = chain->present.low_latency_sem;
     latency_sleep_info.value = chain->present.low_latency_sem_value;
 
-    pthread_mutex_lock(&chain->present.low_latency_swapchain_lock);
+    rwlock_lock_read(&chain->present.low_latency_swapchain_lock);
 
     if (chain->present.vk_swapchain)
     {
@@ -4728,7 +4734,8 @@ HRESULT dxgi_vk_swap_chain_latency_sleep(struct dxgi_vk_swap_chain *chain)
             ERR("Failed to request latency sleep, vr %d.\n", vr);
     }
 
-    pthread_mutex_unlock(&chain->present.low_latency_swapchain_lock);
+    rwlock_unlock_read(&chain->present.low_latency_swapchain_lock);
+    pthread_mutex_unlock(&chain->present.low_latency_sleep_lock);
 
     if (should_sleep)
     {
@@ -4738,10 +4745,10 @@ HRESULT dxgi_vk_swap_chain_latency_sleep(struct dxgi_vk_swap_chain *chain)
         sem_wait_info.flags = 0;
         sem_wait_info.semaphoreCount = 1;
         sem_wait_info.pSemaphores = &chain->present.low_latency_sem;
-        sem_wait_info.pValues = &chain->present.low_latency_sem_value;
+        sem_wait_info.pValues = &latency_sleep_info.value;
 
         cookie = vkd3d_queue_timeline_trace_register_low_latency_sleep(
-                &chain->queue->device->queue_timeline_trace, chain->present.low_latency_sem_value);
+                &chain->queue->device->queue_timeline_trace, latency_sleep_info.value);
         vr = VK_CALL(vkWaitSemaphores(chain->queue->device->vk_device, &sem_wait_info, UINT64_MAX));
         vkd3d_queue_timeline_trace_complete_low_latency_sleep(
                 &chain->queue->device->queue_timeline_trace, cookie);
@@ -4795,17 +4802,16 @@ void dxgi_vk_swap_chain_set_latency_marker(struct dxgi_vk_swap_chain *chain,
     if (chain->debug_latency && marker == VK_LATENCY_MARKER_PRESENT_START_NV)
         INFO("Setting present frame marker %"PRIu64".\n", frameID);
 
-    /* Our presentation-thread markers serialize with swapchain creation and
-     * destruction. Do not block them behind LatencySleep. Application calls
-     * still need the lifetime lock. */
+    /* Application markers may run alongside sleep, but not swapchain destruction.
+     * Presentation-thread markers already serialize with creation and destruction. */
     if (from_app)
-        pthread_mutex_lock(&chain->present.low_latency_swapchain_lock);
+        rwlock_lock_read(&chain->present.low_latency_swapchain_lock);
 
     if (chain->present.vk_swapchain)
         VK_CALL(vkSetLatencyMarkerNV(chain->queue->device->vk_device, chain->present.vk_swapchain, &latency_marker_info));
 
     if (from_app)
-        pthread_mutex_unlock(&chain->present.low_latency_swapchain_lock);
+        rwlock_unlock_read(&chain->present.low_latency_swapchain_lock);
 }
 
 void dxgi_vk_swap_chain_get_latency_info(struct dxgi_vk_swap_chain *chain, D3D12_LATENCY_RESULTS *latency_results)
@@ -4816,7 +4822,7 @@ void dxgi_vk_swap_chain_get_latency_info(struct dxgi_vk_swap_chain *chain, D3D12
     VkGetLatencyMarkerInfoNV marker_info;
     uint32_t i;
 
-    pthread_mutex_lock(&chain->present.low_latency_swapchain_lock);
+    rwlock_lock_read(&chain->present.low_latency_swapchain_lock);
 
     if (chain->present.vk_swapchain)
     {
@@ -4878,7 +4884,7 @@ void dxgi_vk_swap_chain_get_latency_info(struct dxgi_vk_swap_chain *chain, D3D12
         }
     }
 
-    pthread_mutex_unlock(&chain->present.low_latency_swapchain_lock);
+    rwlock_unlock_read(&chain->present.low_latency_swapchain_lock);
 }
 
 ULONG dxgi_vk_swap_chain_incref(struct dxgi_vk_swap_chain *chain)
