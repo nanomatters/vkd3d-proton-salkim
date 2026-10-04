@@ -1,4 +1,21 @@
-# Salkim modifications by Erhan Bilgili on 2026-09-01 and 2026-09-29.
+# Salkim modifications by Erhan Bilgili on:
+# 2026-09-01, 2026-09-29 and 2026-10-04.
+
+reflex_test_source = custom_target('reflex-lifetime-source',
+  input : [ 'test_reflex_lifetime.py', '../libs/vkd3d/swapchain.c', '../include/private/vkd3d_threads.h' ],
+  output : 'reflex_lifetime.c',
+  command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
+
+reflex_test = executable('reflex-lifetime', reflex_test_source,
+  dependencies : threads_dep,
+  c_args : vkd3d_compiler.get_supported_arguments([ '-UNDEBUG', '-Wno-unused-function', '-Wno-unused-variable' ]),
+  install : false)
+
+foreach reflex_case : [ 'request-marker', 'request-timing', 'marker-lifetime', 'timing-lifetime',
+                       'semaphore-readers', 'serialized-sleeps', 'overlapping-waits',
+                       'absent', 'failed', 'out-of-band' ]
+  test('reflex-' + reflex_case, reflex_test, args : [ reflex_case ], timeout : 10)
+endforeach
 
 vkd3d_test_flags = []
 vkd3d_test_deps = [ lib_d3d12, vkd3d_common_dep ]
