@@ -1,7 +1,7 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
  * 2026-09-01, 2026-09-02, 2026-09-10, 2026-09-11, 2026-09-18,
- * 2026-09-19, 2026-09-25, 2026-10-01, 2026-10-04.
+ * 2026-09-19, 2026-09-25, 2026-10-01, 2026-10-04, 2026-10-09.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2022 Hans-Kristian Arntzen for Valve Corporation
@@ -1491,8 +1491,11 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetColorSpace(IDXGIVkSwapCha
     if (!dxgi_vk_swap_chain_supports_color_space(chain, ColorSpace))
         return E_INVALIDARG;
 
-    chain->user.dxgi_color_space_type = ColorSpace;
-    chain->user.modifies_hdr_metadata = true;
+    if (chain->user.dxgi_color_space_type != ColorSpace)
+    {
+        chain->user.dxgi_color_space_type = ColorSpace;
+        chain->user.modifies_hdr_metadata = true;
+    }
 
     return S_OK;
 }
@@ -1501,6 +1504,11 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_SetHDRMetaData(IDXGIVkSwapCh
 {
     struct dxgi_vk_swap_chain *chain = impl_from_IDXGIVkSwapChain(iface);
     TRACE("iface %p, pMetadata %p.\n", iface, pMetaData);
+    if (chain->user.dxgi_hdr_metadata.Type == pMetaData->Type &&
+            (pMetaData->Type != DXGI_HDR_METADATA_TYPE_HDR10 ||
+            !memcmp(&chain->user.dxgi_hdr_metadata.HDR10, &pMetaData->HDR10, sizeof(pMetaData->HDR10))))
+        return S_OK;
+
     chain->user.dxgi_hdr_metadata = *pMetaData;
     chain->user.modifies_hdr_metadata = true;
     return S_OK;
