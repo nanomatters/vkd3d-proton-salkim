@@ -280,3 +280,86 @@ void test_execute_indirect_dynamic_strip_cut(void)
     ID3D12GraphicsCommandList9_Release(list9);
     destroy_dgc_state_test(&test);
 }
+
+void test_execute_indirect_zero_view_mask(void)
+{
+    const D3D12_VIEW_INSTANCE_LOCATION location = {0, 0};
+    D3D12_FEATURE_DATA_D3D12_OPTIONS3 options = {0};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC desc;
+    ID3D12GraphicsCommandList1 *list1;
+    struct dgc_state_test test;
+    ID3D12Device2 *device2;
+    const D3D12_RECT empty = {0, 0, 0, 0};
+    HRESULT hr;
+    struct
+    {
+        union d3d12_root_signature_subobject root_signature;
+        union d3d12_shader_bytecode_subobject vs, ps;
+        union d3d12_blend_subobject blend;
+        union d3d12_sample_mask_subobject sample_mask;
+        union d3d12_rasterizer_subobject rasterizer;
+        union d3d12_primitive_topology_subobject topology;
+        union d3d12_render_target_formats_subobject formats;
+        union d3d12_sample_desc_subobject sample_desc;
+        union d3d12_view_instancing_subobject views;
+    } stream = {0};
+
+    if (!init_dgc_state_test(&test, 1))
+        return;
+    ID3D12Device_CheckFeatureSupport(test.context.device, D3D12_FEATURE_D3D12_OPTIONS3, &options, sizeof(options));
+    if (!options.ViewInstancingTier)
+    {
+        skip("View instancing is not supported.\n");
+        destroy_dgc_state_test(&test);
+        return;
+    }
+    hr = ID3D12Device_QueryInterface(test.context.device, &IID_ID3D12Device2, (void **)&device2);
+    ok(hr == S_OK, "Failed to get device interface, hr %#x.\n", (int)hr);
+    hr = ID3D12GraphicsCommandList_QueryInterface(test.context.list,
+            &IID_ID3D12GraphicsCommandList1, (void **)&list1);
+    ok(hr == S_OK, "Failed to get command list interface, hr %#x.\n", (int)hr);
+    init_pipeline_state_desc(&desc, test.context.root_signature, DXGI_FORMAT_R8G8B8A8_UNORM, NULL, NULL, NULL);
+    stream.root_signature.type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE;
+    stream.root_signature.root_signature = desc.pRootSignature;
+    stream.vs.type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS;
+    stream.vs.shader_bytecode = desc.VS;
+    stream.ps.type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS;
+    stream.ps.shader_bytecode = desc.PS;
+    stream.blend.type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND;
+    stream.blend.blend_desc = desc.BlendState;
+    stream.sample_mask.type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK;
+    stream.sample_mask.sample_mask = desc.SampleMask;
+    stream.rasterizer.type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER;
+    stream.rasterizer.rasterizer_desc = desc.RasterizerState;
+    stream.topology.type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY;
+    stream.topology.primitive_topology_type = desc.PrimitiveTopologyType;
+    stream.formats.type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS;
+    stream.formats.render_target_formats.NumRenderTargets = 1;
+    stream.formats.render_target_formats.RTFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    stream.sample_desc.type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC;
+    stream.sample_desc.sample_desc = desc.SampleDesc;
+    stream.views.type = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VIEW_INSTANCING;
+    stream.views.view_instancing_desc.ViewInstanceCount = 1;
+    stream.views.view_instancing_desc.pViewInstanceLocations = &location;
+    stream.views.view_instancing_desc.Flags = D3D12_VIEW_INSTANCING_FLAG_ENABLE_VIEW_INSTANCE_MASKING;
+    hr = create_pipeline_state_from_stream(device2, &stream, &test.context.pipeline_state);
+    ok(hr == S_OK, "Failed to create view-instancing pipeline, hr %#x.\n", (int)hr);
+
+    begin_dgc_state_test(&test);
+    ID3D12GraphicsCommandList1_SetViewInstanceMask(list1, 1);
+    ID3D12GraphicsCommandList_RSSetScissorRects(test.context.list, 1, &empty);
+    ID3D12GraphicsCommandList_DrawInstanced(test.context.list, 3, 1, 0, 0);
+    ID3D12GraphicsCommandList_RSSetScissorRects(test.context.list, 1, &test.context.scissor_rect);
+    ID3D12GraphicsCommandList1_SetViewInstanceMask(list1, 0);
+    ID3D12GraphicsCommandList_ExecuteIndirect(test.context.list, test.signature, 1, test.arguments, 0, NULL, 0);
+    ID3D12GraphicsCommandList1_SetViewInstanceMask(list1, 1);
+    ID3D12GraphicsCommandList_ExecuteIndirect(test.context.list, test.signature, 1, test.arguments, 0, NULL, 0);
+    ID3D12GraphicsCommandList_EndQuery(test.context.list, test.queries, D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0);
+    transition_resource_state(test.context.list, test.context.render_target,
+            D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    check_sub_resource_uint(test.context.render_target, 0, test.context.queue, test.context.list, 0xff00ff00, 0);
+
+    ID3D12GraphicsCommandList1_Release(list1);
+    ID3D12Device2_Release(device2);
+    destroy_dgc_state_test(&test);
+}
