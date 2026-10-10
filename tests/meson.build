@@ -22,7 +22,7 @@ dgc_test_args = meson.get_compiler('c', native : true).get_supported_arguments([
   '-UNDEBUG', '-Wno-unused-function', '-Wno-unused-variable',
   '-Wno-unused-parameter', '-Wno-unused-but-set-variable' ])
 
-foreach recorder : [ 'wbi_recording' ]
+foreach recorder : [ 'dgc_recording', 'wbi_recording' ]
   recorder_source = custom_target(recorder + '-source',
     input : [ 'test_' + recorder + '.py', '../libs/vkd3d/command.c' ],
     output : recorder + '.c',
@@ -32,7 +32,13 @@ foreach recorder : [ 'wbi_recording' ]
     include_directories : vkd3d_external_includes,
     c_args : dgc_test_args,
     install : false)
-  test(recorder, recorder_test, timeout : 10)
+  if recorder == 'dgc_recording'
+    foreach recording_case : [ 'capture-success', 'capture-eligibility' ]
+      test('dgc-' + recording_case, recorder_test, args : [ recording_case ], timeout : 10)
+    endforeach
+  else
+    test(recorder, recorder_test, timeout : 10)
+  endif
 endforeach
 
 vkd3d_test_flags = []
