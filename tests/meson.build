@@ -17,6 +17,24 @@ foreach reflex_case : [ 'request-marker', 'request-timing', 'marker-lifetime', '
   test('reflex-' + reflex_case, reflex_test, args : [ reflex_case ], timeout : 10)
 endforeach
 
+# These tests record production command-list code without requiring a Vulkan device.
+dgc_test_args = meson.get_compiler('c', native : true).get_supported_arguments([
+  '-UNDEBUG', '-Wno-unused-function', '-Wno-unused-variable',
+  '-Wno-unused-parameter', '-Wno-unused-but-set-variable' ])
+
+foreach recorder : [ 'wbi_recording' ]
+  recorder_source = custom_target(recorder + '-source',
+    input : [ 'test_' + recorder + '.py', '../libs/vkd3d/command.c' ],
+    output : recorder + '.c',
+    command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
+  recorder_test = executable(recorder, recorder_source,
+    native : true,
+    include_directories : vkd3d_external_includes,
+    c_args : dgc_test_args,
+    install : false)
+  test(recorder, recorder_test, timeout : 10)
+endforeach
+
 vkd3d_test_flags = []
 vkd3d_test_deps = [ lib_d3d12, vkd3d_common_dep ]
 if vkd3d_platform == 'windows'
