@@ -6382,6 +6382,10 @@ static void vk_access_and_stage_flags_from_d3d12_resource_state(const struct d3d
 
             case D3D12_RESOURCE_STATE_COPY_DEST:
                 *stages |= VK_PIPELINE_STAGE_2_COPY_BIT;
+                /* WriteBufferImmediate uses vkCmdUpdateBuffer, including writes
+                 * recorded in a preceding command list. */
+                if (d3d12_resource_is_buffer(resource))
+                    *stages |= VK_PIPELINE_STAGE_2_CLEAR_BIT;
                 /* When we have unified layouts we don't need to transition layouts to do copies,
                  * so we can do it "properly". */
                 if (d3d12_device_supports_unified_layouts(device) || d3d12_resource_is_buffer(resource))
@@ -11460,7 +11464,7 @@ static void d3d12_command_list_begin_transfer(struct d3d12_command_list *list)
                 list->transfer_batch.write_after_read_hazard_stages &
                 ~list->transfer_batch.shader_resource_execution_stages_are_idle;
         vk_memory_barrier.srcAccessMask = 0;
-        vk_memory_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        vk_memory_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT;
         vk_memory_barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
 
         list->transfer_batch.write_after_read_hazard_stages = 0;
@@ -11578,8 +11582,8 @@ static void d3d12_command_list_end_transfer_batch(struct d3d12_command_list *lis
         dep_info.pMemoryBarriers = &vk_memory_barrier;
 
         vk_memory_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-        /* We only do magic inside COPY_BIT stage. RESOLVES are different beasts. */
-        vk_memory_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        /* COPY_DEST includes buffer updates from WriteBufferImmediate. */
+        vk_memory_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT;
         vk_memory_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
         vk_memory_barrier.dstStageMask = list->transfer_batch.read_after_write_hazard_stages;
         vk_memory_barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
@@ -13640,7 +13644,7 @@ static void d3d12_command_list_merge_copy_tracking(struct d3d12_command_list *li
         {
             /* If we're doing a transfer barrier, fuse in any lingering COPY -> RESOURCE barrier. */
             d3d12_command_list_barrier_batch_add_global_transition(list, batch,
-                   VK_PIPELINE_STAGE_2_COPY_BIT, 0,
+                   VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT, 0,
                    list->transfer_batch.read_after_write_hazard_stages, VK_ACCESS_2_SHADER_READ_BIT);
             list->transfer_batch.read_after_write_hazard_stages = 0;
         }
@@ -13650,7 +13654,7 @@ static void d3d12_command_list_merge_copy_tracking(struct d3d12_command_list *li
             /* If we're doing a transfer barrier, fuse in any lingering RESOURCE -> COPY barrier. */
             d3d12_command_list_barrier_batch_add_global_transition(list, batch,
                     list->transfer_batch.write_after_read_hazard_stages, 0,
-                    VK_PIPELINE_STAGE_2_COPY_BIT, 0);
+                    VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT, 0);
             list->transfer_batch.shader_resource_execution_stages_are_idle |= list->transfer_batch.write_after_read_hazard_stages;
             list->transfer_batch.write_after_read_hazard_stages = 0;
         }
@@ -19990,6 +19994,11 @@ static void STDMETHODCALLTYPE d3d12_command_list_WriteBufferImmediate(d3d12_comm
 
     TRACE("iface %p, count %u, parameters %p, modes %p.\n", iface, count, parameters, modes);
 
+    if (!count)
+        return;
+
+    d3d12_command_list_begin_transfer(list);
+
     /* Always flush WBI batch if we're outside a render pass instance, since
      * otherwise we're only calling end_wbi_batch in end_current_render_pass. */
     do_flush = !(list->rendering_info.state_flags & VKD3D_RENDERING_ACTIVE);
@@ -22466,6 +22475,13 @@ static void d3d12_command_list_process_enhanced_barrier_global(struct d3d12_comm
     dst_stages = vk_stage_flags_from_d3d12_barrier(list, barrier->SyncAfter, barrier->AccessAfter);
     src_access = vk_access_flags_from_d3d12_barrier(list, barrier->SyncBefore, barrier->AccessBefore);
     dst_access = vk_access_flags_from_d3d12_barrier(list, barrier->SyncAfter, barrier->AccessAfter);
+
+    /* Global and buffer copy barriers also cover WriteBufferImmediate, which
+     * uses Vulkan's CLEAR stage. Texture copies do not need that stage. */
+    if (barrier->SyncBefore & D3D12_BARRIER_SYNC_COPY)
+        src_stages |= VK_PIPELINE_STAGE_2_CLEAR_BIT;
+    if (barrier->SyncAfter & D3D12_BARRIER_SYNC_COPY)
+        dst_stages |= VK_PIPELINE_STAGE_2_CLEAR_BIT;
 
     src_stages = vk_sanitize_stage_flags_for_access(list, src_stages, src_access);
     dst_stages = vk_sanitize_stage_flags_for_access(list, dst_stages, dst_access);
