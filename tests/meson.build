@@ -23,7 +23,7 @@ dgc_test_args = meson.get_compiler('c', native : true).get_supported_arguments([
   '-Wno-unused-parameter', '-Wno-unused-but-set-variable' ])
 
 foreach recorder : [ 'dgc_recording', 'dgc_replay', 'wbi_recording',
-                     'root_descriptor_failures', 'indirect_allocation' ]
+                     'root_descriptor_failures', 'indirect_allocation', 'dgc_predication' ]
   recorder_inputs = [ 'test_' + recorder + '.py', '../libs/vkd3d/command.c' ]
   if recorder == 'root_descriptor_failures'
     recorder_inputs += [ 'test_dgc_recording.py' ]
