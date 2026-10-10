@@ -241,6 +241,8 @@ static @DGC_RETURN_TYPE@ patch_count(struct d3d12_command_list *list, struct d3d
     patch_calls++;
     patched_count_address = patch_args.dst_indirect_count_va;
     @DGC_SUCCESS@
+    goto restore_predication;
+restore_predication:
     @DGC_RETURN@
 }
 
@@ -259,6 +261,8 @@ static @DGC_RETURN_TYPE@ prepare_execute(struct d3d12_command_list *list, struct
     execute_address = generated_ext.preprocessAddress;
     execute_size = generated_ext.preprocessSize;
     @DGC_SUCCESS@
+    goto restore_predication;
+restore_predication:
     @DGC_RETURN@
 }
 
