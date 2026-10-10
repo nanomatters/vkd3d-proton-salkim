@@ -169,6 +169,8 @@ decl_test(test_resolve_query_data_in_different_command_list);
 decl_test(test_resolve_query_data_in_reordered_command_list);
 decl_test(test_execute_indirect);
 decl_test(test_execute_indirect_barrier_states);
+decl_test(test_execute_indirect_dynamic_depth_bias);
+decl_test(test_execute_indirect_dynamic_strip_cut);
 decl_test(test_execute_indirect_state);
 decl_test(test_execute_indirect_state_predication);
 decl_test(test_execute_indirect_state_tier_11);

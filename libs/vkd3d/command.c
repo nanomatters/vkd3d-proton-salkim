@@ -18557,16 +18557,17 @@ void d3d12_command_list_flush_dgc_batch(struct d3d12_command_list *list)
 
     list->dgc_batch.draws_count = 0;
 
-    /* Restore state. */
+    /* Binding a PSO resets dynamic depth bias and strip cut. Restore the API
+     * state afterwards, just as when replaying each captured draw above. */
+    d3d12_command_list_SetPipelineState(
+            &list->ID3D12GraphicsCommandList_iface,
+            state ? &state->ID3D12PipelineState_iface : NULL);
+
     list->graphics_bindings = graphics_bindings;
     list->dynamic_state = dynamic_state;
     list->index_buffer = index_buffer;
 
     d3d12_command_list_invalidate_all_state(list);
-
-    d3d12_command_list_SetPipelineState(
-            &list->ID3D12GraphicsCommandList_iface,
-            state ? &state->ID3D12PipelineState_iface : NULL);
 }
 
 static void STDMETHODCALLTYPE d3d12_command_list_ExecuteIndirect(d3d12_command_list_iface *iface,
