@@ -1,7 +1,8 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
  * 2026-09-01, 2026-09-02, 2026-09-10, 2026-09-11, 2026-09-18,
- * 2026-09-19, 2026-09-25, 2026-10-01, 2026-10-04, 2026-10-09.
+ * 2026-09-19, 2026-09-25, 2026-10-01, 2026-10-04, 2026-10-09,
+ * 2026-10-10.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2022 Hans-Kristian Arntzen for Valve Corporation
@@ -2492,6 +2493,22 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
      * that is not ourselves. */
     d3d12_device_notify_vk_swapchain_creation(chain->queue->device, chain);
 
+    vr = VK_CALL(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk_physical_device, chain->vk_surface, &surface_caps));
+    if (vr != VK_SUCCESS)
+    {
+        WARN("Failed to query surface capabilities, vr %d.\n", vr);
+        if (vr == VK_ERROR_SURFACE_LOST_KHR)
+            chain->present.is_surface_lost = true;
+        else if (vr == VK_ERROR_DEVICE_LOST || vr == VK_ERROR_OUT_OF_HOST_MEMORY || vr == VK_ERROR_OUT_OF_DEVICE_MEMORY)
+            dxgi_vk_swap_chain_set_error(chain, vr);
+        return;
+    }
+
+    /* Minimized or suspended surfaces need no WSI image. Complete the request
+     * through the normal dummy-present path instead of rejecting the flip. */
+    if (!surface_caps.maxImageExtent.width || !surface_caps.maxImageExtent.height)
+        return;
+
     /* If we fail to query formats we are hosed, treat it as a SURFACE_LOST scenario. */
     pthread_mutex_lock(&chain->properties.lock);
     /* This is only called on an event where we have to recreate the swapchain,
@@ -2504,13 +2521,7 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
     }
     pthread_mutex_unlock(&chain->properties.lock);
 
-    VK_CALL(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk_physical_device, chain->vk_surface, &surface_caps));
     dxgi_vk_swap_chain_update_wait_timing_capabilities(chain);
-
-    /* Minimized or suspended surfaces need no WSI image. Complete the request
-     * through the normal dummy-present path instead of rejecting the flip. */
-    if (!surface_caps.maxImageExtent.width || !surface_caps.maxImageExtent.height)
-        return;
 
     /* Sanity check, this cannot happen on Win32 surfaces, but could happen on Wayland. */
     if (surface_caps.currentExtent.width == UINT32_MAX || surface_caps.currentExtent.height == UINT32_MAX)
