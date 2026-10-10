@@ -49,6 +49,19 @@ foreach recorder : [ 'dgc_recording', 'dgc_replay', 'wbi_recording',
   endif
 endforeach
 
+foreach recorder : [ 'swapchain_extent' ]
+  recorder_source = custom_target(recorder + '-source',
+    input : [ 'test_' + recorder + '.py', '../libs/vkd3d/swapchain.c' ],
+    output : recorder + '.c',
+    command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
+  recorder_test = executable(recorder, recorder_source,
+    native : true,
+    dependencies : dependency('threads', native : true),
+    c_args : dgc_test_args,
+    install : false)
+  test(recorder, recorder_test, timeout : 15)
+endforeach
+
 vkd3d_test_flags = []
 vkd3d_test_deps = [ lib_d3d12, vkd3d_common_dep ]
 if vkd3d_platform == 'windows'
