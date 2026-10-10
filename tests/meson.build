@@ -59,6 +59,7 @@ foreach hud_case : [ 'empty', 'publication', 'barrier', 'direct', 'blank', 'fail
 endforeach
 
 d3d12_test_src = [
+  'd3d12_wbi_dgc.c',
   'd3d12_dxvk_interop_device.c',
   'd3d12_clip_cull_distance.c',
   'd3d12_enhanced_barriers.c',

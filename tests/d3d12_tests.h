@@ -264,6 +264,7 @@ decl_test(test_conditional_rendering);
 decl_test(test_bufinfo_instruction_dxbc);
 decl_test(test_bufinfo_instruction_dxil);
 decl_test(test_write_buffer_immediate);
+decl_test(test_write_buffer_immediate_mixed_modes);
 decl_test(test_register_space_sm51);
 decl_test(test_register_space_dxil);
 decl_test(test_constant_buffer_sm51);

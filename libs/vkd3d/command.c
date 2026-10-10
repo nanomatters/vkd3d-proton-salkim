@@ -11648,6 +11648,7 @@ static void d3d12_command_list_end_wbi_batch(struct d3d12_command_list *list)
             VK_CALL(vkCmdWriteBufferMarkerAMD(list->cmd.vk_command_buffer,
                     list->wbi_batch.stages[i], list->wbi_batch.buffers[i],
                     list->wbi_batch.offsets[i], list->wbi_batch.values[i]));
+            first = i + 1;
         }
     }
 
