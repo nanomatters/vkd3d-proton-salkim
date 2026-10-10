@@ -8416,7 +8416,11 @@ static void d3d12_command_list_update_dynamic_state(struct d3d12_command_list *l
             VkExtent2D max_fb_extent;
             const VkRect2D *scissor;
 
-            max_fb_extent = list->rendering_info.info.renderArea.extent;
+            /* DGC preprocessing can update state before rendering_info has been
+             * refreshed for the bound attachments. Use the same extent that
+             * begin_render_pass will use when executing the commands. */
+            max_fb_extent.width = list->fb_width;
+            max_fb_extent.height = list->fb_height;
 
             for (i = 0; i < dyn_state->viewport_count; i++)
             {
