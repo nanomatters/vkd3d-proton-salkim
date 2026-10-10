@@ -13940,6 +13940,7 @@ static bool d3d12_command_list_check_resource_barrier_trivial_copy_resource(
             return false;
 
         if (barrier->Transition.StateBefore == D3D12_RESOURCE_STATE_COPY_DEST &&
+            barrier->Transition.StateAfter != D3D12_RESOURCE_STATE_COMMON &&
             (barrier->Transition.StateAfter & states) == barrier->Transition.StateAfter)
         {
             vk_access_and_stage_flags_from_d3d12_resource_state(
@@ -13947,6 +13948,7 @@ static bool d3d12_command_list_check_resource_barrier_trivial_copy_resource(
                     list->vk_queue_flags, &read_after_write_stages, &dummy);
         }
         else if (barrier->Transition.StateAfter == D3D12_RESOURCE_STATE_COPY_DEST &&
+            barrier->Transition.StateBefore != D3D12_RESOURCE_STATE_COMMON &&
             (barrier->Transition.StateBefore & states) == barrier->Transition.StateBefore)
         {
             vk_access_and_stage_flags_from_d3d12_resource_state(
@@ -14021,18 +14023,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_ResourceBarrier(d3d12_command_l
                 VkImageLayout new_layout = VK_IMAGE_LAYOUT_UNDEFINED;
                 uint32_t dsv_decay_mask = 0;
 
-                /* If we have not observed any transition to INDIRECT_ARGUMENT it means
-                 * that in this command buffer there couldn't legally have been writes to an indirect
-                 * command buffer. The docs mention an implementation strategy where we can do this optimization.
-                 * This is very handy when handling back-to-back ExecuteIndirects(). */
-                if (transition->StateAfter == D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT)
-                {
-                    d3d12_command_list_debug_mark_label(list, "Indirect Argument barrier", 1.0f, 1.0f, 0.0f, 1.0f);
-                    /* Any indirect patching commands now have to go to normal command buffer, unless we split the sequence. */
-                    list->cmd.vk_post_indirect_barrier_commands = list->cmd.vk_command_buffer;
-                    list->cmd.observes_indirect_argument_barrier = true;
-                }
-
                 if (!is_valid_resource_state(transition->StateBefore))
                 {
                     d3d12_command_list_mark_as_invalid(list,
@@ -14050,6 +14040,20 @@ static void STDMETHODCALLTYPE d3d12_command_list_ResourceBarrier(d3d12_command_l
                 {
                     d3d12_command_list_mark_as_invalid(list, "A resource pointer is NULL.");
                     continue;
+                }
+
+                /* Indirect reads can be combined with other read states or implicitly
+                 * promoted from COMMON for buffers. Do not hoist preprocessing ahead
+                 * of the writes made available by either transition, including across
+                 * command lists submitted together. */
+                if ((transition->StateAfter & D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT) ||
+                        (transition->StateAfter == D3D12_RESOURCE_STATE_COMMON &&
+                        d3d12_resource_is_buffer(preserve_resource)))
+                {
+                    d3d12_command_list_debug_mark_label(list, "Indirect Argument barrier", 1.0f, 1.0f, 0.0f, 1.0f);
+                    /* Any indirect patching commands now have to go to normal command buffer, unless we split the sequence. */
+                    list->cmd.vk_post_indirect_barrier_commands = list->cmd.vk_command_buffer;
+                    list->cmd.observes_indirect_argument_barrier = true;
                 }
 
                 if (list->type == D3D12_COMMAND_LIST_TYPE_COPY)
