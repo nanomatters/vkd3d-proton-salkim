@@ -1,5 +1,5 @@
 # Salkim modifications by Erhan Bilgili on:
-# 2026-09-01, 2026-09-29 and 2026-10-04.
+# 2026-09-01, 2026-09-29, 2026-10-04 and 2026-10-10.
 
 reflex_test_source = custom_target('reflex-lifetime-source',
   input : [ 'test_reflex_lifetime.py', '../libs/vkd3d/swapchain.c', '../include/private/vkd3d_threads.h' ],
@@ -22,9 +22,14 @@ dgc_test_args = meson.get_compiler('c', native : true).get_supported_arguments([
   '-UNDEBUG', '-Wno-unused-function', '-Wno-unused-variable',
   '-Wno-unused-parameter', '-Wno-unused-but-set-variable' ])
 
-foreach recorder : [ 'dgc_recording', 'wbi_recording' ]
+foreach recorder : [ 'dgc_recording', 'dgc_replay', 'wbi_recording',
+                     'root_descriptor_failures' ]
+  recorder_inputs = [ 'test_' + recorder + '.py', '../libs/vkd3d/command.c' ]
+  if recorder == 'root_descriptor_failures'
+    recorder_inputs += [ 'test_dgc_recording.py' ]
+  endif
   recorder_source = custom_target(recorder + '-source',
-    input : [ 'test_' + recorder + '.py', '../libs/vkd3d/command.c' ],
+    input : recorder_inputs,
     output : recorder + '.c',
     command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
   recorder_test = executable(recorder, recorder_source,
@@ -33,7 +38,10 @@ foreach recorder : [ 'dgc_recording', 'wbi_recording' ]
     c_args : dgc_test_args,
     install : false)
   if recorder == 'dgc_recording'
-    foreach recording_case : [ 'capture-success', 'capture-eligibility' ]
+    foreach recording_case : [ 'capture-success', 'capture-failure', 'capture-eligibility',
+                              'count-success', 'count-failure', 'count-absent', 'stream-failure',
+                              'preprocess-success', 'preprocess-failure', 'preprocess-existing',
+                              'root-ubo-success', 'root-ubo-failure' ]
       test('dgc-' + recording_case, recorder_test, args : [ recording_case ], timeout : 10)
     endforeach
   else
