@@ -2449,6 +2449,7 @@ static HRESULT d3d12_command_allocator_allocate_fixup_command_buffer(struct d3d1
     {
         WARN("Failed to begin command buffer, vr %d.\n", vr);
         VK_CALL(vkFreeCommandBuffers(device->vk_device, allocator->primary_pool.vk_command_pool, 1, vk_cmd_buffer));
+        *vk_cmd_buffer = VK_NULL_HANDLE;
         return hresult_from_vk_result(vr);
     }
 
@@ -2498,6 +2499,7 @@ static HRESULT d3d12_command_allocator_allocate_init_post_indirect_command_buffe
         WARN("Failed to begin command buffer, vr %d.\n", vr);
         VK_CALL(vkFreeCommandBuffers(device->vk_device, allocator->primary_pool.vk_command_pool,
                 1, &iteration->vk_post_indirect_barrier_commands));
+        iteration->vk_post_indirect_barrier_commands = VK_NULL_HANDLE;
         return hresult_from_vk_result(vr);
     }
 
@@ -3744,9 +3746,14 @@ static void d3d12_command_list_check_end_of_command_list_cleanup(struct d3d12_co
     {
         const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
         VkResult vr;
+        HRESULT hr;
 
-        d3d12_command_allocator_allocate_fixup_command_buffer(list->allocator, list,
-                &list->cmd.vk_cleanup_commands, "Cleanup");
+        if (FAILED(hr = d3d12_command_allocator_allocate_fixup_command_buffer(list->allocator, list,
+                &list->cmd.vk_cleanup_commands, "Cleanup")))
+        {
+            d3d12_command_list_mark_as_invalid(list, "Failed to allocate cleanup command buffer, hr %#x.\n", hr);
+            return;
+        }
 
         if ((vr = VK_CALL(vkEndCommandBuffer(list->cmd.vk_command_buffer))) != VK_SUCCESS)
             ERR("Failed to end command buffer, vr %d\n", vr);
@@ -9008,6 +9015,7 @@ static bool d3d12_command_list_emit_multi_dispatch_indirect_count(struct d3d12_c
     VkCommandBuffer vk_patch_cmd_buffer;
     VkMemoryBarrier2 vk_barrier;
     VkDependencyInfo dep_info;
+    HRESULT hr;
 
     vkd3d_meta_get_multi_dispatch_indirect_pipeline(&list->device->meta_ops, &pipeline_info);
 
@@ -9019,7 +9027,11 @@ static bool d3d12_command_list_emit_multi_dispatch_indirect_count(struct d3d12_c
     d3d12_command_list_end_current_render_pass(list, false);
     d3d12_command_list_end_transfer_batch(list, true);
 
-    d3d12_command_allocator_allocate_init_post_indirect_command_buffer(list->allocator, list);
+    if (FAILED(hr = d3d12_command_allocator_allocate_init_post_indirect_command_buffer(list->allocator, list)))
+    {
+        d3d12_command_list_mark_as_invalid(list, "Failed to allocate indirect command buffer, hr %#x.\n", hr);
+        return false;
+    }
     vk_patch_cmd_buffer = list->cmd.vk_post_indirect_barrier_commands;
 
     if (vk_patch_cmd_buffer == list->cmd.vk_command_buffer)
@@ -9079,6 +9091,7 @@ static bool d3d12_command_list_emit_predicated_command(struct d3d12_command_list
     VkCommandBuffer vk_patch_cmd_buffer;
     VkMemoryBarrier2 vk_barrier;
     VkDependencyInfo dep_info;
+    HRESULT hr;
 
     vkd3d_meta_get_predicate_pipeline(&list->device->meta_ops, command_type, &pipeline_info);
 
@@ -9087,7 +9100,11 @@ static bool d3d12_command_list_emit_predicated_command(struct d3d12_command_list
             pipeline_info.data_size, sizeof(uint32_t), ~0u, scratch))
         return false;
 
-    d3d12_command_allocator_allocate_init_post_indirect_command_buffer(list->allocator, list);
+    if (FAILED(hr = d3d12_command_allocator_allocate_init_post_indirect_command_buffer(list->allocator, list)))
+    {
+        d3d12_command_list_mark_as_invalid(list, "Failed to allocate indirect command buffer, hr %#x.\n", hr);
+        return false;
+    }
     vk_patch_cmd_buffer = list->cmd.vk_post_indirect_barrier_commands;
 
     if (vk_patch_cmd_buffer == list->cmd.vk_command_buffer)
@@ -17698,6 +17715,7 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetPredication(d3d12_command_li
     VkCommandBuffer vk_patch_cmd_buffer;
     VkMemoryBarrier2 vk_barrier;
     VkDependencyInfo dep_info;
+    HRESULT hr;
 
     TRACE("iface %p, buffer %p, aligned_buffer_offset %#"PRIx64", operation %#x.\n",
             iface, buffer, aligned_buffer_offset, operation);
@@ -17720,7 +17738,11 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetPredication(d3d12_command_li
 
         /* Even if it's not super relevant for performance yet, we need to hoist this to init buffer
          * since an ExecuteIndirect patch shader will need to read the predicate VA potentially. */
-        d3d12_command_allocator_allocate_init_post_indirect_command_buffer(list->allocator, list);
+        if (FAILED(hr = d3d12_command_allocator_allocate_init_post_indirect_command_buffer(list->allocator, list)))
+        {
+            d3d12_command_list_mark_as_invalid(list, "Failed to allocate indirect command buffer, hr %#x.\n", hr);
+            return;
+        }
         vk_patch_cmd_buffer = list->cmd.vk_post_indirect_barrier_commands;
 
         /* Resolve 64-bit predicate into a 32-bit location so that this works with
@@ -18293,7 +18315,12 @@ static HRESULT d3d12_command_list_execute_indirect_state_template_dgc(
                     &vkd3d_implicit_instance_count, vkd3d_memory_order_relaxed) - 1;
         }
 
-        d3d12_command_allocator_allocate_init_post_indirect_command_buffer(list->allocator, list);
+        if (FAILED(hr = d3d12_command_allocator_allocate_init_post_indirect_command_buffer(list->allocator, list)))
+        {
+            d3d12_command_list_mark_as_invalid(list, "Failed to allocate indirect command buffer, hr %#x.\n", hr);
+            result = hr;
+            return result;
+        }
         vk_patch_cmd_buffer = list->cmd.vk_post_indirect_barrier_commands;
 
         if (vk_patch_cmd_buffer == list->cmd.vk_command_buffer)
@@ -18441,7 +18468,12 @@ static HRESULT d3d12_command_list_execute_indirect_state_template_dgc(
             return result;
         }
 
-        d3d12_command_allocator_allocate_init_post_indirect_command_buffer(list->allocator, list);
+        if (FAILED(hr = d3d12_command_allocator_allocate_init_post_indirect_command_buffer(list->allocator, list)))
+        {
+            d3d12_command_list_mark_as_invalid(list, "Failed to allocate indirect command buffer, hr %#x.\n", hr);
+            result = hr;
+            return result;
+        }
 
         VK_CALL(vkCmdPreprocessGeneratedCommandsEXT(list->cmd.vk_post_indirect_barrier_commands,
                 &generated_ext, list->cmd.vk_command_buffer));
