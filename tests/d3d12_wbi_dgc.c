@@ -249,6 +249,128 @@ void test_write_buffer_immediate_mixed_modes(void)
     destroy_test_context(&context);
 }
 
+void test_write_buffer_immediate_copy_overlap(void)
+{
+    D3D12_WRITEBUFFERIMMEDIATE_PARAMETER parameters[2];
+    ID3D12GraphicsCommandList2 *command_list2;
+    D3D12_TEXTURE_COPY_LOCATION dst, src;
+    D3D12_SUBRESOURCE_DATA texture_data;
+    unsigned int data[64], expected[64];
+    struct test_context_desc desc;
+    struct test_context context;
+    struct resource_readback rb;
+    ID3D12Resource *buffer, *upload, *texture;
+    unsigned int mode, i;
+    HRESULT hr;
+
+    memset(&desc, 0, sizeof(desc));
+    desc.no_render_target = true;
+    desc.no_root_signature = true;
+    desc.no_pipeline = true;
+    if (!init_test_context(&context, &desc))
+        return;
+    hr = ID3D12GraphicsCommandList_QueryInterface(context.list,
+            &IID_ID3D12GraphicsCommandList2, (void **)&command_list2);
+    if (FAILED(hr))
+    {
+        skip("ID3D12GraphicsCommandList2 is not supported.\n");
+        destroy_test_context(&context);
+        return;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(data); i++)
+        data[i] = 0xabcd0000u + i;
+    upload = create_upload_buffer(context.device, sizeof(data), data);
+    texture = create_default_texture2d(context.device, ARRAY_SIZE(data), 1, 1, 1,
+            DXGI_FORMAT_R32_UINT, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+    texture_data.pData = data;
+    texture_data.RowPitch = sizeof(data);
+    texture_data.SlicePitch = sizeof(data);
+    upload_texture_data(texture, &texture_data, 1, context.queue, context.list);
+    reset_command_list(context.list, context.allocator);
+    transition_resource_state(context.list, texture,
+            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    buffer = create_default_buffer(context.device, sizeof(data),
+            D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+    memset(&src, 0, sizeof(src));
+    src.pResource = texture;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    memset(&dst, 0, sizeof(dst));
+    dst.pResource = buffer;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R32_UINT;
+    dst.PlacedFootprint.Footprint.Width = ARRAY_SIZE(data);
+    dst.PlacedFootprint.Footprint.Height = 1;
+    dst.PlacedFootprint.Footprint.Depth = 1;
+    dst.PlacedFootprint.Footprint.RowPitch = sizeof(data);
+    parameters[0].Dest = ID3D12Resource_GetGPUVirtualAddress(buffer) + 5 * sizeof(UINT);
+    parameters[0].Value = 0xdead1234;
+    parameters[1] = parameters[0];
+    parameters[1].Value = 0xbeef5678;
+
+    for (mode = 0; mode < 7; mode++)
+    {
+        vkd3d_test_set_context("Overlap mode %u", mode);
+        memcpy(expected, data, sizeof(data));
+        ID3D12GraphicsCommandList_CopyBufferRegion(context.list, buffer, 0, upload, 0, sizeof(data));
+        if (mode == 6)
+            ID3D12GraphicsCommandList_CopyTextureRegion(context.list, &dst, 0, 0, 0, &src, NULL);
+
+        /* All operations keep the legacy destination in COPY_DEST. DEFAULT
+         * immediate writes must order overlapping writes like ordinary copies,
+         * without an application barrier between them. */
+        if (mode == 3)
+        {
+            ID3D12GraphicsCommandList2_WriteBufferImmediate(command_list2, 2, parameters, NULL);
+            expected[5] = parameters[1].Value;
+        }
+        else
+        {
+            ID3D12GraphicsCommandList2_WriteBufferImmediate(command_list2, 1, parameters, NULL);
+            expected[5] = parameters[0].Value;
+            if (mode == 1)
+            {
+                ID3D12GraphicsCommandList_CopyBufferRegion(context.list, buffer, 5 * sizeof(UINT),
+                        upload, 9 * sizeof(UINT), sizeof(UINT));
+                expected[5] = data[9];
+            }
+            else if (mode == 2)
+            {
+                ID3D12GraphicsCommandList2_WriteBufferImmediate(command_list2, 1, &parameters[1], NULL);
+                expected[5] = parameters[1].Value;
+            }
+            else if (mode == 4)
+            {
+                ID3D12GraphicsCommandList_CopyBufferRegion(context.list, buffer, 7 * sizeof(UINT),
+                        upload, 11 * sizeof(UINT), sizeof(UINT));
+                expected[7] = data[11];
+            }
+            else if (mode == 5)
+            {
+                ID3D12GraphicsCommandList_CopyTextureRegion(context.list, &dst, 0, 0, 0, &src, NULL);
+                memcpy(expected, data, sizeof(data));
+            }
+        }
+
+        transition_resource_state(context.list, buffer,
+                D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        get_buffer_readback_with_command_list(buffer, DXGI_FORMAT_R32_UINT, &rb, context.queue, context.list);
+        for (i = 0; i < ARRAY_SIZE(expected); i++)
+            ok(get_readback_uint(&rb, i, 0, 0) == expected[i], "Word %u: got %#x, expected %#x.\n",
+                    i, get_readback_uint(&rb, i, 0, 0), expected[i]);
+        release_resource_readback(&rb);
+        reset_command_list(context.list, context.allocator);
+        /* Buffers decay to COMMON after the completed execution. The next
+         * copy promotes to COPY_DEST without requiring another transition. */
+    }
+    vkd3d_test_set_context(NULL);
+    ID3D12Resource_Release(buffer);
+    ID3D12Resource_Release(texture);
+    ID3D12Resource_Release(upload);
+    ID3D12GraphicsCommandList2_Release(command_list2);
+    destroy_test_context(&context);
+}
+
 void test_write_buffer_immediate_enhanced_barriers(void)
 {
     D3D12_WRITEBUFFERIMMEDIATE_PARAMETER parameter;
