@@ -18144,10 +18144,15 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
     }
 
     /* Don't try to batch if we have predication since it's just needless complexity.
-     * Don't do this on tilers since we'll be introducing more technically unnecessary render pass flushes. */
+     * Don't do this on tilers since we'll be introducing more technically unnecessary render pass flushes.
+     * Root UBO uploads allocate fresh descriptors on replay, but explicit preprocessing
+     * requires the same descriptors when executing. Keep these draws on the immediate path. */
     if (!list->predication.va && dgc_mode == VKD3D_DGC_MODE_APPLICATION_CALL &&
         !list->device->workarounds.tiler_suspend_resume &&
-        !explicit_preprocess && list->state && list->state->pipeline_type != VKD3D_PIPELINE_TYPE_COMPUTE)
+        !explicit_preprocess && list->state && list->state->pipeline_type != VKD3D_PIPELINE_TYPE_COMPUTE &&
+        list->graphics_bindings.root_signature &&
+        !(d3d12_root_signature_get_layout(list->graphics_bindings.root_signature,
+                list->state->pipeline_type)->flags & VKD3D_ROOT_SIGNATURE_USE_PUSH_CONSTANT_UNIFORM_BLOCK))
     {
         /* FIXME: Will not work if doing indirect breadcrumb trace, but that's not merged. */
         struct vkd3d_dgc_batch_draw *draw;
