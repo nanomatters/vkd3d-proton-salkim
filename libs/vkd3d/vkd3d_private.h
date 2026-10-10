@@ -1,7 +1,7 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
  * 2026-09-01, 2026-09-12, 2026-09-18, 2026-09-19, 2026-09-26,
- * 2026-10-03.
+ * 2026-10-03, 2026-10-10.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -3135,7 +3135,7 @@ struct d3d12_transfer_batch_state
     struct d3d12_tracked_texture_copy tracked_copy_textures[VKD3D_TRACKED_TEXTURE_COPY_COUNT];
     unsigned int tracked_copy_texture_count;
 
-    /* COPY and RESOLVE are relevant here. */
+    /* COPY, CLEAR buffer updates and RESOLVE are relevant here. */
     VkPipelineStageFlags2 vk_stages;
 
     /* We defer RESOURCE -> COPY_DEST barriers. The layouts for these are always the common layout,
