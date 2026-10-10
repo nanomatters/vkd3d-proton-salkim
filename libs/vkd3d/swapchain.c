@@ -615,8 +615,16 @@ static void dxgi_vk_swap_chain_push_present_id(struct dxgi_vk_swap_chain *chain,
 {
     struct present_wait_entry *entry;
     pthread_mutex_lock(&chain->wait_thread.lock);
-    vkd3d_array_reserve((void **)&chain->wait_thread.wait_queue, &chain->wait_thread.wait_queue_size,
-            chain->wait_thread.wait_queue_count + 1, sizeof(*chain->wait_thread.wait_queue));
+    if (!vkd3d_array_reserve((void **)&chain->wait_thread.wait_queue, &chain->wait_thread.wait_queue_size,
+            chain->wait_thread.wait_queue_count + 1, sizeof(*chain->wait_thread.wait_queue)))
+    {
+        /* Initialization guarantees storage. Retain every completion, including
+         * shutdown, by reusing a slot after the waiter retires an earlier entry. */
+        assert(chain->wait_thread.wait_queue_size);
+        WARN("Failed to grow present wait queue, waiting for space.\n");
+        while (chain->wait_thread.wait_queue_count == chain->wait_thread.wait_queue_size)
+            pthread_cond_wait(&chain->wait_thread.cond, &chain->wait_thread.lock);
+    }
     entry = &chain->wait_thread.wait_queue[chain->wait_thread.wait_queue_count++];
     entry->id = present_id;
     entry->present_count = present_count;
@@ -4447,8 +4455,9 @@ static void *dxgi_vk_swap_chain_wait_worker(void *chain_)
         chain->wait_thread.wait_queue_count -= 1;
         memmove(chain->wait_thread.wait_queue, chain->wait_thread.wait_queue + 1,
                 chain->wait_thread.wait_queue_count * sizeof(*chain->wait_thread.wait_queue));
-        if (chain->wait_thread.wait_queue_count == 0)
-            pthread_cond_signal(&chain->wait_thread.cond);
+        if (chain->wait_thread.wait_queue_count == 0 ||
+                chain->wait_thread.wait_queue_count + 1 == chain->wait_thread.wait_queue_size)
+            pthread_cond_broadcast(&chain->wait_thread.cond);
         pthread_mutex_unlock(&chain->wait_thread.lock);
     }
 
@@ -4461,8 +4470,9 @@ static HRESULT dxgi_vk_swap_chain_init_waiter_thread(struct dxgi_vk_swap_chain *
 
     spinlock_init(&chain->frame_statistics.lock);
 
-    vkd3d_array_reserve((void **)&chain->wait_thread.wait_queue, &chain->wait_thread.wait_queue_size,
-            DXGI_MAX_SWAP_CHAIN_BUFFERS, sizeof(*chain->wait_thread.wait_queue));
+    if (!vkd3d_array_reserve((void **)&chain->wait_thread.wait_queue, &chain->wait_thread.wait_queue_size,
+            DXGI_MAX_SWAP_CHAIN_BUFFERS, sizeof(*chain->wait_thread.wait_queue)))
+        return E_OUTOFMEMORY;
     pthread_mutex_init(&chain->wait_thread.lock, NULL);
     pthread_cond_init(&chain->wait_thread.cond, NULL);
     pthread_cond_init(&chain->wait_thread.present_cond, NULL);
@@ -4471,6 +4481,7 @@ static HRESULT dxgi_vk_swap_chain_init_waiter_thread(struct dxgi_vk_swap_chain *
      * That thread will only wait on present IDs and release HANDLEs as necessary. */
     if (pthread_create(&chain->wait_thread.thread, NULL, dxgi_vk_swap_chain_wait_worker, chain))
     {
+        vkd3d_free(chain->wait_thread.wait_queue);
         pthread_mutex_destroy(&chain->wait_thread.lock);
         pthread_cond_destroy(&chain->wait_thread.cond);
         pthread_cond_destroy(&chain->wait_thread.present_cond);
