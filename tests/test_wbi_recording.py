@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2026 Erhan Bilgili
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Exercise the production WBI batch recorder without an AMD Vulkan device."""
 
