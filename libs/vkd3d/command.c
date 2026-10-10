@@ -18434,7 +18434,12 @@ static HRESULT d3d12_command_list_execute_indirect_state_template_dgc(
                 list->predication.enabled_on_command_buffer = false;
             }
 
-            d3d12_command_list_emit_predicated_command(list, type, count_va, &args, &predication_allocation);
+            if (!d3d12_command_list_emit_predicated_command(list, type, count_va, &args, &predication_allocation))
+            {
+                d3d12_command_list_mark_as_invalid(list, "Failed to prepare DGC predication.\n");
+                result = E_OUTOFMEMORY;
+                goto restore_predication;
+            }
             require_custom_predication = true;
         }
     }
@@ -18509,13 +18514,13 @@ static HRESULT d3d12_command_list_execute_indirect_state_template_dgc(
     if (signature->pipeline_type == VKD3D_PIPELINE_TYPE_COMPUTE)
     {
         if (!d3d12_command_list_update_compute_pipeline(list))
-            return result;
+            goto restore_predication;
     }
     else
     {
         d3d12_command_list_promote_dsv_layout(list);
         if (!d3d12_command_list_update_graphics_pipeline(list, signature->pipeline_type))
-            return result;
+            goto restore_predication;
     }
 
     current_pipeline = list->current_pipeline;
@@ -18558,7 +18563,7 @@ static HRESULT d3d12_command_list_execute_indirect_state_template_dgc(
         {
             d3d12_command_list_mark_as_invalid(list, "Failed to allocate DGC stream memory, hr %#x.\n", hr);
             result = hr;
-            return result;
+            goto restore_predication;
         }
 
         if (count_buffer)
@@ -18570,7 +18575,7 @@ static HRESULT d3d12_command_list_execute_indirect_state_template_dgc(
             {
                 d3d12_command_list_mark_as_invalid(list, "Failed to allocate DGC count memory.\n");
                 result = E_OUTOFMEMORY;
-                return result;
+                goto restore_predication;
             }
         }
 
@@ -18594,7 +18599,7 @@ static HRESULT d3d12_command_list_execute_indirect_state_template_dgc(
         {
             d3d12_command_list_mark_as_invalid(list, "Failed to allocate indirect command buffer, hr %#x.\n", hr);
             result = hr;
-            return result;
+            goto restore_predication;
         }
         vk_patch_cmd_buffer = list->cmd.vk_post_indirect_barrier_commands;
 
@@ -18644,7 +18649,7 @@ static HRESULT d3d12_command_list_execute_indirect_state_template_dgc(
             if (!d3d12_command_list_begin_render_pass(list, signature->pipeline_type))
             {
                 WARN("Failed to begin render pass, ignoring draw.\n");
-                return result;
+                goto restore_predication;
             }
         }
     }
@@ -18657,20 +18662,20 @@ static HRESULT d3d12_command_list_execute_indirect_state_template_dgc(
         if (!d3d12_command_list_update_descriptors(list))
         {
             result = E_OUTOFMEMORY;
-            return result;
+            goto restore_predication;
         }
     }
 
     if (signature->pipeline_type == VKD3D_PIPELINE_TYPE_COMPUTE &&
             !d3d12_command_list_update_compute_state(list))
-        return result;
+        goto restore_predication;
 
     if (!require_ibo_update &&
             signature->desc.pArgumentDescs[signature->desc.NumArgumentDescs - 1].Type ==
                     D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED &&
             !d3d12_command_list_update_index_buffer(list))
     {
-        return result;
+        goto restore_predication;
     }
 
     if (!preprocess_va)
@@ -18681,7 +18686,7 @@ static HRESULT d3d12_command_list_execute_indirect_state_template_dgc(
         {
             d3d12_command_list_mark_as_invalid(list, "Failed to allocate DGC preprocess memory, hr %#x.\n", hr);
             result = hr;
-            return result;
+            goto restore_predication;
         }
     }
 
@@ -18740,14 +18745,14 @@ static HRESULT d3d12_command_list_execute_indirect_state_template_dgc(
             VK_CALL(vkCmdPreprocessGeneratedCommandsEXT(list->cmd.vk_command_buffer,
                    &generated_ext, list->cmd.vk_command_buffer));
             result = S_OK;
-            return result;
+            goto restore_predication;
         }
 
         if (FAILED(hr = d3d12_command_allocator_allocate_init_post_indirect_command_buffer(list->allocator, list)))
         {
             d3d12_command_list_mark_as_invalid(list, "Failed to allocate indirect command buffer, hr %#x.\n", hr);
             result = hr;
-            return result;
+            goto restore_predication;
         }
 
         VK_CALL(vkCmdPreprocessGeneratedCommandsEXT(list->cmd.vk_post_indirect_barrier_commands,
@@ -18790,6 +18795,7 @@ static HRESULT d3d12_command_list_execute_indirect_state_template_dgc(
     d3d12_command_list_invalidate_all_state(list);
     result = S_OK;
 
+restore_predication:
     if (restart_predication)
     {
         /* Rearm the conditional rendering. */
