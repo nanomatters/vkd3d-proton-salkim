@@ -19997,6 +19997,9 @@ static void STDMETHODCALLTYPE d3d12_command_list_WriteBufferImmediate(d3d12_comm
     if (!count)
         return;
 
+    /* Ending a render pass also flushes pending immediate writes. Submit deferred
+     * draws and their transfer dependencies before queuing any later writes. */
+    d3d12_command_list_flush_dgc_batch(list);
     d3d12_command_list_begin_transfer(list);
 
     /* Always flush WBI batch if we're outside a render pass instance, since
@@ -20051,7 +20054,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_WriteBufferImmediate(d3d12_comm
             {
                 /* Implicitly calls end_wbi_batch. We cannot have any pending transfers
                  * while inside a render pass instance that we would have to end. */
-                d3d12_command_list_flush_dgc_batch(list);
                 d3d12_command_list_end_current_render_pass(list, true);
 
                 /* Flush subsequent batches now that the render pass instance has ended */
