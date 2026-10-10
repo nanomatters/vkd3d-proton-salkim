@@ -186,6 +186,42 @@ void test_execute_indirect_dynamic_depth_bias(void)
     destroy_dgc_state_test(&test);
 }
 
+void test_execute_indirect_scissor_after_target_change(void)
+{
+    struct dgc_state_test test;
+    ID3D12Resource *small_target;
+    ID3D12DescriptorHeap *heap;
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv;
+    const float constants[] = {0, 0};
+    unsigned int i;
+
+    if (!init_dgc_state_test(&test, 1))
+        return;
+    test.context.pipeline_state = create_pipeline_state(test.context.device, test.context.root_signature,
+            DXGI_FORMAT_R8G8B8A8_UNORM, NULL, NULL, NULL);
+    small_target = create_default_texture2d(test.context.device, 4, 4, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM,
+            D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    heap = create_cpu_descriptor_heap(test.context.device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1);
+    rtv = ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(heap);
+    ID3D12Device_CreateRenderTargetView(test.context.device, small_target, NULL, rtv);
+
+    begin_dgc_state_test(&test);
+    ID3D12GraphicsCommandList_OMSetRenderTargets(test.context.list, 1, &rtv, true, NULL);
+    ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(test.context.list, 0, 2, constants, 0);
+    ID3D12GraphicsCommandList_DrawInstanced(test.context.list, 3, 1, 0, 0);
+    ID3D12GraphicsCommandList_OMSetRenderTargets(test.context.list, 1, &test.context.rtv, true, NULL);
+    for (i = 0; i < 2; i++)
+        ID3D12GraphicsCommandList_ExecuteIndirect(test.context.list, test.signature, 1, test.arguments, 0, NULL, 0);
+    ID3D12GraphicsCommandList_EndQuery(test.context.list, test.queries, D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0);
+    transition_resource_state(test.context.list, test.context.render_target,
+            D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    check_sub_resource_uint(test.context.render_target, 0, test.context.queue, test.context.list, 0xff00ff00, 0);
+
+    ID3D12Resource_Release(small_target);
+    ID3D12DescriptorHeap_Release(heap);
+    destroy_dgc_state_test(&test);
+}
+
 void test_execute_indirect_dynamic_strip_cut(void)
 {
     static const uint16_t indices[] = {0, 1, 0xffff, 2};
