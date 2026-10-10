@@ -78,6 +78,7 @@ endforeach
 
 d3d12_test_src = [
   'd3d12_dgc_barriers.c',
+  'd3d12_dgc_state.c',
   'd3d12_wbi_dgc.c',
   'd3d12_dxvk_interop_device.c',
   'd3d12_clip_cull_distance.c',
