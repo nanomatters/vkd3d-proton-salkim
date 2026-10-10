@@ -18492,6 +18492,11 @@ void d3d12_command_list_flush_dgc_batch(struct d3d12_command_list *list)
             enum vkd3d_dgc_mode dgc_mode;
             draw = &list->dgc_batch.draws[i];
 
+            /* A zero dynamic view mask disables this draw, not the batch.
+             * Skip it in both passes so execution never uses an unprepared stream. */
+            if (draw->state->graphics.multiview.dynamic_mask && !draw->dynamic_state.view_mask)
+                continue;
+
             /* Lots of weird state stuff to consider, so take the common path until proven necessary to make it faster. */
             d3d12_command_list_SetPipelineState(
                     &list->ID3D12GraphicsCommandList_iface,
