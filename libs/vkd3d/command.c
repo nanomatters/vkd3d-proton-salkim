@@ -1,6 +1,7 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-11, 2026-09-12, 2026-09-18, 2026-09-26, 2026-09-29.
+ * 2026-09-11, 2026-09-12, 2026-09-18, 2026-09-26, 2026-09-29,
+ * 2026-10-10.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -8109,7 +8110,7 @@ void d3d12_command_list_fetch_root_parameter_data(struct d3d12_command_list *lis
     d3d12_command_list_fetch_root_parameter_uniform_block_data(list, bindings, dst_data);
 }
 
-static void d3d12_command_list_update_root_descriptors(struct d3d12_command_list *list,
+static bool d3d12_command_list_update_root_descriptors(struct d3d12_command_list *list,
         struct vkd3d_pipeline_bindings *bindings, VkPipelineBindPoint vk_bind_point,
         VkPipelineLayout layout, VkShaderStageFlags push_stages, uint32_t root_signature_flags)
 {
@@ -8128,9 +8129,13 @@ static void d3d12_command_list_update_root_descriptors(struct d3d12_command_list
 
     if (root_signature_flags & VKD3D_ROOT_SIGNATURE_USE_PUSH_CONSTANT_UNIFORM_BLOCK)
     {
-        d3d12_command_allocator_allocate_scratch_memory(list->allocator,
+        if (!d3d12_command_allocator_allocate_scratch_memory(list->allocator,
                 VKD3D_SCRATCH_POOL_KIND_UNIFORM_UPLOAD, sizeof(root_parameter_data),
-                D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT, ~0u, &alloc);
+                D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT, ~0u, &alloc))
+        {
+            d3d12_command_list_mark_as_invalid(list, "Failed to allocate root parameter buffer.\n");
+            return false;
+        }
         ptr_root_parameter_data = alloc.host_ptr;
 
         /* Dirty all state that enters push UBO block to make sure it's emitted.
@@ -8230,6 +8235,8 @@ static void d3d12_command_list_update_root_descriptors(struct d3d12_command_list
                 layout, root_signature->root_descriptor_set,
                 descriptor_write_count, descriptor_writes));
     }
+
+    return true;
 }
 
 static void d3d12_command_list_update_hoisted_descriptors(struct d3d12_command_list *list,
@@ -8288,7 +8295,7 @@ static void d3d12_command_list_update_hoisted_descriptors(struct d3d12_command_l
     bindings->dirty_flags &= ~VKD3D_PIPELINE_DIRTY_HOISTED_DESCRIPTORS;
 }
 
-static void d3d12_command_list_update_descriptors(struct d3d12_command_list *list)
+static bool d3d12_command_list_update_descriptors(struct d3d12_command_list *list)
 {
     struct vkd3d_pipeline_bindings *bindings = d3d12_command_list_get_bindings(list, list->active_pipeline_type);
     const struct d3d12_root_signature *rs = bindings->root_signature;
@@ -8298,7 +8305,7 @@ static void d3d12_command_list_update_descriptors(struct d3d12_command_list *lis
     VkPipelineLayout layout;
 
     if (!rs)
-        return;
+        return true;
 
     bind_point_layout = d3d12_root_signature_get_layout(rs, list->active_pipeline_type);
     layout = bind_point_layout->vk_pipeline_layout;
@@ -8321,16 +8328,18 @@ static void d3d12_command_list_update_descriptors(struct d3d12_command_list *lis
         if (bindings->root_descriptor_dirty_mask || bindings->root_constant_dirty_mask
                 || (bindings->dirty_flags & VKD3D_PIPELINE_DIRTY_DESCRIPTOR_TABLE_OFFSETS))
         {
-            d3d12_command_list_update_root_descriptors(list, bindings, vk_bind_point, layout, push_stages,
-                    bind_point_layout->flags);
+            if (!d3d12_command_list_update_root_descriptors(list, bindings, vk_bind_point, layout, push_stages,
+                    bind_point_layout->flags))
+                return false;
         }
     }
     else
     {
         if (bindings->root_descriptor_dirty_mask)
         {
-            d3d12_command_list_update_root_descriptors(list, bindings, vk_bind_point, layout, push_stages,
-                    bind_point_layout->flags);
+            if (!d3d12_command_list_update_root_descriptors(list, bindings, vk_bind_point, layout, push_stages,
+                    bind_point_layout->flags))
+                return false;
         }
 
         if (bindings->root_constant_dirty_mask)
@@ -8342,6 +8351,8 @@ static void d3d12_command_list_update_descriptors(struct d3d12_command_list *lis
         if (bindings->dirty_flags & VKD3D_PIPELINE_DIRTY_INLINE_REDZONE)
             d3d12_command_list_update_inline_redzone(list, bindings);
     }
+
+    return true;
 }
 
 static void d3d12_command_list_check_pre_compute_barrier(
@@ -8355,7 +8366,8 @@ static bool d3d12_command_list_update_compute_state(struct d3d12_command_list *l
         return false;
 
     d3d12_command_list_check_pre_compute_barrier(list, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-    d3d12_command_list_update_descriptors(list);
+    if (!d3d12_command_list_update_descriptors(list))
+        return false;
 
 #ifdef VKD3D_ENABLE_PROFILING
     vkd3d_timestamp_profiler_mark_pre_command(list->device->timestamp_profiler, list);
@@ -8384,7 +8396,8 @@ static bool d3d12_command_list_update_raygen_state(struct d3d12_command_list *li
     /* DXR uses compute bind point for descriptors, we will redirect internally to
      * raygen bind point in Vulkan. */
     d3d12_command_list_check_pre_compute_barrier(list, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
-    d3d12_command_list_update_descriptors(list);
+    if (!d3d12_command_list_update_descriptors(list))
+        return false;
 
     /* If we have a static sampler set for local root signatures, bind it now.
      * Don't bother with dirty tracking of this for time being.
@@ -8948,7 +8961,8 @@ static bool d3d12_command_list_begin_render_pass(struct d3d12_command_list *list
         if (list->dynamic_state.dirty_flags)
             d3d12_command_list_update_dynamic_state(list);
 
-        d3d12_command_list_update_descriptors(list);
+        if (!d3d12_command_list_update_descriptors(list))
+            return false;
     }
 
     if (list->rendering_info.state_flags & VKD3D_RENDERING_ACTIVE)
@@ -18322,7 +18336,8 @@ enum vkd3d_dgc_mode
     VKD3D_DGC_MODE_PREPROCESS_AND_EXECUTE,
 };
 
-static void d3d12_command_list_execute_indirect_state_template_dgc(
+/* S_FALSE skips only this draw. Failed HRESULTs stop replay of the batch. */
+static HRESULT d3d12_command_list_execute_indirect_state_template_dgc(
         struct d3d12_command_list *list, struct d3d12_command_signature *signature,
         uint32_t max_command_count,
         struct d3d12_resource *arg_buffer, UINT64 arg_buffer_offset,
@@ -18347,6 +18362,7 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
     bool explicit_preprocess;
     bool require_ibo_update;
     bool require_patch;
+    HRESULT result = S_FALSE;
     const char *tag;
     unsigned int i;
     HRESULT hr;
@@ -18435,8 +18451,12 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
     {
         /* FIXME: Will not work if doing indirect breadcrumb trace, but that's not merged. */
         struct vkd3d_dgc_batch_draw *draw;
-        vkd3d_array_reserve((void **)&list->dgc_batch.draws, &list->dgc_batch.draws_size,
-            list->dgc_batch.draws_count + 1, sizeof(*list->dgc_batch.draws));
+        if (!vkd3d_array_reserve((void **)&list->dgc_batch.draws, &list->dgc_batch.draws_size,
+                list->dgc_batch.draws_count + 1, sizeof(*list->dgc_batch.draws)))
+        {
+            d3d12_command_list_mark_as_invalid(list, "Failed to allocate DGC batch.\n");
+            return E_OUTOFMEMORY;
+        }
         draw = &list->dgc_batch.draws[list->dgc_batch.draws_count++];
 
         /* Just defer the command. Capture any relevant state we might need to replay.
@@ -18457,7 +18477,7 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
 
         /* Future commands are expected to observe the cleared state if the signature changes. */
         d3d12_command_list_clear_signature_state(list, signature);
-        return;
+        return S_OK;
     }
 
     if (dgc_mode == VKD3D_DGC_MODE_APPLICATION_CALL)
@@ -18467,13 +18487,13 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
     if (signature->pipeline_type == VKD3D_PIPELINE_TYPE_COMPUTE)
     {
         if (!d3d12_command_list_update_compute_pipeline(list))
-            return;
+            return result;
     }
     else
     {
         d3d12_command_list_promote_dsv_layout(list);
         if (!d3d12_command_list_update_graphics_pipeline(list, signature->pipeline_type))
-            return;
+            return result;
     }
 
     current_pipeline = list->current_pipeline;
@@ -18514,19 +18534,21 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
         if (FAILED(hr = d3d12_command_signature_allocate_stream_memory_for_list(
                 list, signature, max_command_count, &stream_allocation)))
         {
-            WARN("Failed to allocate stream memory.\n");
-            return;
+            d3d12_command_list_mark_as_invalid(list, "Failed to allocate DGC stream memory, hr %#x.\n", hr);
+            result = hr;
+            return result;
         }
 
         if (count_buffer)
         {
-            if (FAILED(hr = d3d12_command_allocator_allocate_scratch_memory(list->allocator,
+            if (!d3d12_command_allocator_allocate_scratch_memory(list->allocator,
                     VKD3D_SCRATCH_POOL_KIND_DEVICE_STORAGE,
                     sizeof(uint32_t), sizeof(uint32_t),
-                    ~0u, &count_allocation)))
+                    ~0u, &count_allocation))
             {
-                WARN("Failed to allocate count memory.\n");
-                return;
+                d3d12_command_list_mark_as_invalid(list, "Failed to allocate DGC count memory.\n");
+                result = E_OUTOFMEMORY;
+                return result;
             }
         }
 
@@ -18595,7 +18617,7 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
             if (!d3d12_command_list_begin_render_pass(list, signature->pipeline_type))
             {
                 WARN("Failed to begin render pass, ignoring draw.\n");
-                return;
+                return result;
             }
         }
     }
@@ -18605,19 +18627,23 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
         d3d12_command_list_update_graphics_pipeline(list, signature->pipeline_type);
         if (list->dynamic_state.dirty_flags)
             d3d12_command_list_update_dynamic_state(list);
-        d3d12_command_list_update_descriptors(list);
+        if (!d3d12_command_list_update_descriptors(list))
+        {
+            result = E_OUTOFMEMORY;
+            return result;
+        }
     }
 
     if (signature->pipeline_type == VKD3D_PIPELINE_TYPE_COMPUTE &&
             !d3d12_command_list_update_compute_state(list))
-        return;
+        return result;
 
     if (!require_ibo_update &&
             signature->desc.pArgumentDescs[signature->desc.NumArgumentDescs - 1].Type ==
                     D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED &&
             !d3d12_command_list_update_index_buffer(list))
     {
-        return;
+        return result;
     }
 
     if (!preprocess_va)
@@ -18626,8 +18652,9 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
                 list, signature, current_pipeline, explicit_preprocess,
                 max_command_count, &preprocess_allocation, &preprocess_size)))
         {
-            WARN("Failed to allocate preprocess memory.\n");
-            return;
+            d3d12_command_list_mark_as_invalid(list, "Failed to allocate DGC preprocess memory, hr %#x.\n", hr);
+            result = hr;
+            return result;
         }
     }
 
@@ -18685,7 +18712,8 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
             assert(!(list->rendering_info.state_flags & VKD3D_RENDERING_ACTIVE));
             VK_CALL(vkCmdPreprocessGeneratedCommandsEXT(list->cmd.vk_command_buffer,
                    &generated_ext, list->cmd.vk_command_buffer));
-            return;
+            result = S_OK;
+            return result;
         }
 
         d3d12_command_allocator_allocate_init_post_indirect_command_buffer(list->allocator, list);
@@ -18728,6 +18756,7 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
      * invalidate all state. Unclear exactly which state is invalidated though ...
      * Treat it as a meta shader. We need to nuke all state after running execute generated commands. */
     d3d12_command_list_invalidate_all_state(list);
+    result = S_OK;
 
     if (restart_predication)
     {
@@ -18735,6 +18764,8 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
         list->predication.enabled_on_command_buffer = old_predication_enabled_on_command_buffer;
         d3d12_command_list_update_conditional_rendering_state(list, false);
     }
+
+    return result;
 }
 
 void d3d12_command_list_flush_dgc_batch(struct d3d12_command_list *list)
@@ -18772,9 +18803,9 @@ void d3d12_command_list_flush_dgc_batch(struct d3d12_command_list *list)
             enum vkd3d_dgc_mode dgc_mode;
             draw = &list->dgc_batch.draws[i];
 
-            /* A zero dynamic view mask disables this draw, not the batch.
-             * Skip it in both passes so execution never uses an unprepared stream. */
-            if (draw->state->graphics.multiview.dynamic_mask && !draw->dynamic_state.view_mask)
+            /* Skip disabled draws and pipeline failures in both passes so
+             * execution never uses an unprepared stream. */
+            if (!draw->state || (draw->state->graphics.multiview.dynamic_mask && !draw->dynamic_state.view_mask))
                 continue;
 
             /* Lots of weird state stuff to consider, so take the common path until proven necessary to make it faster. */
@@ -18793,14 +18824,18 @@ void d3d12_command_list_flush_dgc_batch(struct d3d12_command_list *list)
 
                 d3d12_command_list_promote_dsv_layout(list);
                 if (!d3d12_command_list_update_graphics_pipeline(list, draw->signature->pipeline_type))
-                    return;
+                {
+                    /* Match the immediate path, which ignores an unbindable draw. */
+                    draw->state = NULL;
+                    continue;
+                }
 
                 if (FAILED(hr = d3d12_command_signature_allocate_preprocess_memory_for_list(
                         list, draw->signature, list->current_pipeline, true,
                         draw->max_command_count, &preprocess_allocation, &draw->preprocess_size)))
                 {
-                    WARN("Failed to allocate preprocess memory.\n");
-                    return;
+                    d3d12_command_list_mark_as_invalid(list, "Failed to allocate DGC preprocess memory, hr %#x.\n", hr);
+                    goto failed;
                 }
 
                 draw->preprocess_va = preprocess_allocation.va;
@@ -18813,11 +18848,15 @@ void d3d12_command_list_flush_dgc_batch(struct d3d12_command_list *list)
             else
                 dgc_mode = VKD3D_DGC_MODE_EXECUTE_ONLY;
 
-            d3d12_command_list_execute_indirect_state_template_dgc(list,
+            hr = d3d12_command_list_execute_indirect_state_template_dgc(list,
                     draw->signature, draw->max_command_count,
                     draw->arg_buffer, draw->arg_buffer_offset,
                     draw->count_buffer, draw->count_buffer_offset,
                     dgc_mode, draw->preprocess_va, draw->preprocess_size);
+            if (FAILED(hr))
+                goto failed;
+            if (hr == S_FALSE)
+                draw->state = NULL;
         }
 
         if (iter == 0 && num_iter == 2)
@@ -18844,6 +18883,12 @@ void d3d12_command_list_flush_dgc_batch(struct d3d12_command_list *list)
         d3d12_command_list_debug_mark_end_region(list);
     }
 
+    goto restore;
+
+failed:
+    d3d12_command_list_debug_mark_end_region(list);
+
+restore:
     list->dgc_batch.draws_count = 0;
 
     /* Binding a PSO resets dynamic depth bias and strip cut. Restore the API
