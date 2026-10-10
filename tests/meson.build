@@ -49,9 +49,13 @@ foreach recorder : [ 'dgc_recording', 'dgc_replay', 'wbi_recording',
   endif
 endforeach
 
-foreach recorder : [ 'swapchain_extent' ]
+foreach recorder : [ 'swapchain_extent', 'swapchain_wait_queue' ]
+  recorder_inputs = [ 'test_' + recorder + '.py', '../libs/vkd3d/swapchain.c' ]
+  if recorder == 'swapchain_wait_queue'
+    recorder_inputs += [ '../libs/vkd3d-common/memory.c' ]
+  endif
   recorder_source = custom_target(recorder + '-source',
-    input : [ 'test_' + recorder + '.py', '../libs/vkd3d/swapchain.c' ],
+    input : recorder_inputs,
     output : recorder + '.c',
     command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
   recorder_test = executable(recorder, recorder_source,
@@ -59,7 +63,14 @@ foreach recorder : [ 'swapchain_extent' ]
     dependencies : dependency('threads', native : true),
     c_args : dgc_test_args,
     install : false)
-  test(recorder, recorder_test, timeout : 15)
+  if recorder == 'swapchain_wait_queue'
+    foreach wait_case : [ 'init-oom', 'thread-oom', 'growth', 'growth-oom',
+                         'values', 'present-wait2', 'shutdown-full' ]
+      test('swapchain-wait-' + wait_case, recorder_test, args : [ wait_case ], timeout : 15)
+    endforeach
+  else
+    test(recorder, recorder_test, timeout : 15)
+  endif
 endforeach
 
 vkd3d_test_flags = []
