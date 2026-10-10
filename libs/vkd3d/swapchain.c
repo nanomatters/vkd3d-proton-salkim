@@ -1977,7 +1977,7 @@ static HRESULT dxgi_vk_swap_chain_init_sync_objects(struct dxgi_vk_swap_chain *c
 
 static void dxgi_vk_swap_chain_drain_waiter(struct dxgi_vk_swap_chain *chain)
 {
-    /* Make sure wait thread is not waiting on anything before we destroy swapchain. */
+    /* Retire all waiter work before changing swapchain state. */
     pthread_mutex_lock(&chain->wait_thread.lock);
 
     /* Skip ahead if there are multiple frames queued. */
@@ -2528,6 +2528,10 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
         return;
     }
     pthread_mutex_unlock(&chain->properties.lock);
+
+    /* Destruction only drains an existing swapchain. Retire dummy presents
+     * before changing the capabilities and creating a new swapchain. */
+    dxgi_vk_swap_chain_drain_waiter(chain);
 
     dxgi_vk_swap_chain_update_wait_timing_capabilities(chain);
 
@@ -4191,7 +4195,7 @@ static void dxgi_vk_swap_chain_update_frame_statistics(struct dxgi_vk_swap_chain
 {
     uint64_t time;
 
-    if (chain->present.timing)
+    if (chain->present.timing && chain->present.vk_swapchain)
     {
         dxgi_vk_swap_chain_poll_past_presentation(chain);
         if (chain->frame_statistics.count < present_count && present_id)
