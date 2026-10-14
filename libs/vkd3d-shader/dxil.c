@@ -1,6 +1,6 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-22, 2026-09-26, 2026-10-03.
+ * 2026-09-22, 2026-09-26, 2026-10-03, 2026-10-14.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2020 Hans-Kristian Arntzen for Valve Corporation
@@ -641,16 +641,16 @@ static void vkd3d_dxil_log_callback(void *userdata, dxil_spv_log_level level, co
     switch (level)
     {
     case DXIL_SPV_LOG_LEVEL_ERROR:
-        ERR("dxil-spirv: %s", msg);
+        ERR("dxil-spirv-salkim: %s", msg);
         break;
 
     case DXIL_SPV_LOG_LEVEL_WARN:
-        WARN("dxil-spirv: %s", msg);
+        WARN("dxil-spirv-salkim: %s", msg);
         break;
 
     default:
     case DXIL_SPV_LOG_LEVEL_DEBUG:
-        TRACE("dxil-spirv: %s", msg);
+        TRACE("dxil-spirv-salkim: %s", msg);
         break;
     }
 }
