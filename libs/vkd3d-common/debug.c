@@ -1,4 +1,6 @@
 /*
+ * Salkim modifications by Erhan Bilgili on 2026-10-14.
+ *
  * Copyright 2016 Józef Kucia for CodeWeavers
  *
  * This library is free software; you can redistribute it and/or
@@ -243,7 +245,7 @@ void vkd3d_dbg_printf(enum vkd3d_dbg_channel channel, enum vkd3d_dbg_level level
         /* Try to match format of Wine log output. */
         ticks = vkd3d_get_current_time_ns();
         offset = snprintf(local_buffer, sizeof(local_buffer),
-                "%3u.%03u:%04x:%04x:%s:vkd3d-proton:%s: ",
+                "%3u.%03u:%04x:%04x:%s:vkd3d-proton-salkim:%s: ",
                 (unsigned int)(ticks / 1000000000), (unsigned int)((ticks % 1000000000) / 1000000),
                 (UINT)GetCurrentProcessId(), tid,
                 debug_level_names[level], function);
