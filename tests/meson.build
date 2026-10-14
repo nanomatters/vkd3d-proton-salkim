@@ -1,5 +1,17 @@
 # Salkim modifications by Erhan Bilgili on:
-# 2026-09-01, 2026-09-29, 2026-10-04 and 2026-10-10.
+# 2026-09-01, 2026-09-29, 2026-10-04, 2026-10-10 and 2026-10-14.
+
+extension_lookup_source = custom_target('extension-lookup-source',
+  input : [ 'test_extension_lookup.py', '../libs/vkd3d/device.c',
+            '../libs/vkd3d-common/debug.c', '../libs/vkd3d-common/platform.c' ],
+  output : 'extension_lookup.c',
+  command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
+
+extension_lookup_test = executable('extension-lookup', extension_lookup_source,
+  native : true,
+  install : false)
+
+test('extension-lookup', extension_lookup_test, timeout : 10)
 
 reflex_test_source = custom_target('reflex-lifetime-source',
   input : [ 'test_reflex_lifetime.py', '../libs/vkd3d/swapchain.c', '../include/private/vkd3d_threads.h' ],
