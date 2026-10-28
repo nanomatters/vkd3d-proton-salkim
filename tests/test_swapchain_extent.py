@@ -89,7 +89,7 @@ typedef struct { VkExtent2D maxImageExtent, currentExtent; } VkSurfaceCapabiliti
 #define VKD3D_PATH_MAX 4096
 #define VK_CALL(call) (call)
 #define WARN(...) ((void)0)
-#define FIXME_ONCE(...) ((void)0)
+#define FIXME_ONCE(...) (++statistics_warnings)
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define max(a, b) ((a) > (b) ? (a) : (b))
 #define vkd3d_memory_order_acquire 0
@@ -144,7 +144,7 @@ struct dxgi_vk_swap_chain
         int vk_swapchain;
         bool is_surface_lost, force_swapchain_recreation, timing, wait2;
         bool compatible_unlocked_present_mode, override_present_mode;
-        bool present_id_valid, present_target_enabled;
+        bool present_id_valid, present_target_enabled, timing_id_committed;
         uint64_t present_count, present_id, internal_blit_count;
     } present;
     struct dxgi_vk_swap_chain_present_request request, request_ring[4];
@@ -162,6 +162,7 @@ static unsigned int eligible_recreations, destroys, demotions, completions, wait
 static unsigned int format_generation, selected_generation;
 static uint64_t waiter_blit_count;
 static unsigned int timing_polls, cpu_samples;
+static unsigned int statistics_warnings;
 static uint64_t cpu_time, report_count, report_time;
 static unsigned int drains;
 static bool wait_thread_initialized, watch_drain_wait, drain_wait_entered;
@@ -300,16 +301,16 @@ static VkResult dxgi_vk_swap_chain_present_signal_blit_semaphore(struct dxgi_vk_
 
 static void dxgi_vk_swap_chain_push_present_id(struct dxgi_vk_swap_chain *swapchain,
         uint64_t present_count, uint64_t present_id, uint64_t begin_frame_time_ns,
-        bool present_timing_enabled, uint64_t blit_count)
+        bool present_timing_enabled, bool timing_id_committed, uint64_t blit_count)
 {
     (void)begin_frame_time_ns;
-    assert(!present_id && !present_timing_enabled);
+    assert(!present_id && !present_timing_enabled && !timing_id_committed);
     assert(present_count == swapchain->present.present_count + 1);
     swapchain->present.present_count = present_count;
     waiter_blit_count = blit_count;
     waiter_signals++;
     /* Synchronously retire the entry as the wait worker would after its GPU wait. */
-    dxgi_vk_swap_chain_update_frame_statistics(swapchain, present_count, present_id);
+    dxgi_vk_swap_chain_update_frame_statistics(swapchain, present_count, present_id, timing_id_committed);
 }
 
 static void dxgi_vk_swap_chain_set_hdr_metadata(struct dxgi_vk_swap_chain *swapchain) { (void)swapchain; }
@@ -335,6 +336,7 @@ static void reset(void)
     drains = 0;
     watch_drain_wait = drain_wait_entered = false;
     chain.queue = &queue;
+    statistics_warnings = 0;
     chain.desc.Width = 1280;
     chain.desc.Height = 720;
     chain.present.internal_blit_count = 7;
@@ -380,7 +382,9 @@ static void test_zero_extent(void)
             queried_caps.maxImageExtent.width = 0;
         if (zero_axes & 2)
             queried_caps.maxImageExtent.height = 0;
+        chain.present.timing_id_committed = true;
         dxgi_vk_swap_chain_present_callback(&chain);
+        assert(!chain.present.timing_id_committed);
         dxgi_vk_swap_chain_present_callback(&chain);
         check_no_creation();
         assert(caps_queries == 2 && destroys == 2 && demotions == 2);
@@ -515,29 +519,50 @@ static void test_live_frame_statistics(void)
     chain.present.timing = true;
     report_count = 3;
     report_time = 5000;
-    /* A live swapchain without a committed present ID must not be queried. */
+    /* Neither a pacing ID nor a telemetry ID was committed. */
     cpu_time = 4000;
-    dxgi_vk_swap_chain_update_frame_statistics(&chain, 2, 0);
+    dxgi_vk_swap_chain_update_frame_statistics(&chain, 2, 0, false);
     assert(!timing_polls && cpu_samples == 1);
     assert(chain.frame_statistics.count == 2 && chain.frame_statistics.time == 4000);
     cpu_samples = 0;
-    dxgi_vk_swap_chain_update_frame_statistics(&chain, 3, 42);
+    dxgi_vk_swap_chain_update_frame_statistics(&chain, 3, 42, false);
     assert(timing_polls == 1 && !cpu_samples);
     assert(chain.frame_statistics.count == 3 && chain.frame_statistics.time == 5000);
 
     /* A live swapchain still polls when its report is delayed, then uses the CPU fallback. */
     cpu_time = 6000;
-    dxgi_vk_swap_chain_update_frame_statistics(&chain, 4, 43);
+    dxgi_vk_swap_chain_update_frame_statistics(&chain, 4, 43, false);
     assert(timing_polls == 2 && cpu_samples == 1);
+    assert(statistics_warnings == 1);
     assert(chain.frame_statistics.count == 4 && chain.frame_statistics.time == 6000);
 
     /* Fallback sampling may not move a previously reported timestamp backwards. */
     chain.present.timing = false;
     cpu_time = 5500;
-    dxgi_vk_swap_chain_update_frame_statistics(&chain, 5, 0);
+    dxgi_vk_swap_chain_update_frame_statistics(&chain, 5, 0, false);
     assert(timing_polls == 2 && cpu_samples == 2);
     assert(chain.frame_statistics.count == 5 && chain.frame_statistics.time == 6000);
     assert(!chain.frame_statistics.lock);
+}
+
+static void test_telemetry_frame_statistics(void)
+{
+    reset();
+    chain.present.vk_swapchain = 1;
+    chain.present.timing = true;
+    cpu_time = 4000;
+    dxgi_vk_swap_chain_update_frame_statistics(&chain, 1, 0, true);
+    assert(timing_polls == 1 && cpu_samples == 1 && !statistics_warnings);
+    assert(chain.frame_statistics.count == 1 && chain.frame_statistics.time == 4000);
+
+    chain.present.vk_swapchain = 0;
+    dxgi_vk_swap_chain_update_frame_statistics(&chain, 2, 0, true);
+    assert(timing_polls == 1 && cpu_samples == 2 && !statistics_warnings);
+
+    chain.present.vk_swapchain = 1;
+    chain.present.timing = false;
+    dxgi_vk_swap_chain_update_frame_statistics(&chain, 3, 0, true);
+    assert(timing_polls == 1 && cpu_samples == 3 && !statistics_warnings);
 }
 
 static void *recreate_thread(void *context)
@@ -563,7 +588,7 @@ static void test_restore_drains_dummy(bool timing)
      * while the completion from the minimized period remains in flight. */
     assert(drains == 1 && chain.wait_thread.skip_waits);
     assert(!chain.present.vk_swapchain && !timing_queries && !eligible_recreations);
-    dxgi_vk_swap_chain_update_frame_statistics(&chain, 1, 0);
+    dxgi_vk_swap_chain_update_frame_statistics(&chain, 1, 0, false);
     check_fallback_statistics(1);
     chain.wait_thread.wait_queue_count = 0;
     assert(!pthread_cond_broadcast(&chain.wait_thread.cond));
@@ -586,6 +611,7 @@ int main(void)
     test_format_errors(false);
     test_format_errors(true);
     test_live_frame_statistics();
+    test_telemetry_frame_statistics();
     assert(!pthread_mutex_destroy(&chain.wait_thread.lock));
     assert(!pthread_cond_destroy(&chain.wait_thread.cond));
     puts("Swapchain extent tests passed (zero extent, threaded restore, query failures, completion, frame statistics).");

@@ -86,7 +86,7 @@ struct dxgi_vk_swap_chain
         _Atomic uint64_t present_count;
         uint64_t present_id, internal_blit_count;
         int vk_swapchain;
-        bool wait2, present_id_valid, present_target_enabled;
+        bool wait2, present_id_valid, present_target_enabled, timing_id_committed;
     } present;
     struct
     {
@@ -110,6 +110,7 @@ static unsigned int allocations, live_allocations, creates, joins, mutex_inits, 
 static unsigned int cond_inits, cond_destroys, space_waits, cpu_waits, permits, gpu_waits;
 static unsigned int releases[3], retired_count, delays;
 static uint64_t retired[64], wait_values[64];
+static bool timing_commits[64];
 static unsigned int wait_kinds[64];
 static _Thread_local unsigned int wait_role;
 
@@ -218,8 +219,13 @@ static struct vkd3d_queue_timeline_trace_cookie vkd3d_queue_timeline_trace_regis
 static void vkd3d_queue_timeline_trace_complete_present_wait(struct vkd3d_queue_timeline_trace *trace,
         struct vkd3d_queue_timeline_trace_cookie cookie) {}
 static void dxgi_vk_swap_chain_delay_next_frame(struct dxgi_vk_swap_chain *c, uint64_t now) { delays++; }
-static void dxgi_vk_swap_chain_update_frame_statistics(struct dxgi_vk_swap_chain *c, uint64_t count, uint64_t id)
-{ assert(retired_count < 64); retired[retired_count++] = count; }
+static void dxgi_vk_swap_chain_update_frame_statistics(struct dxgi_vk_swap_chain *c, uint64_t count,
+        uint64_t id, bool timing_id_committed)
+{
+    assert(retired_count < 64);
+    timing_commits[retired_count] = timing_id_committed;
+    retired[retired_count++] = count;
+}
 static bool vkd3d_native_sync_handle_is_valid(int handle) { return handle != 0; }
 static int vkd3d_native_sync_handle_release(int handle, unsigned int value)
 { assert(value == 1); releases[handle]++; return 0; }
@@ -253,7 +259,7 @@ static void *run_job(void *arg)
     else if (job->cpu)
         dxgi_vk_swap_chain_wait_for_present_count(&chain, job->count);
     else
-        dxgi_vk_swap_chain_push_present_id(&chain, job->count, 0, 0, true, UINT64_MAX);
+        dxgi_vk_swap_chain_push_present_id(&chain, job->count, 0, 0, true, false, UINT64_MAX);
     assert(!pthread_mutex_lock(&state_lock));
     job->done = 1;
     assert(!pthread_cond_broadcast(&state_cond));
@@ -275,7 +281,7 @@ static void fill_queue(void)
     unsigned int i;
     initialize();
     for (i = 1; i <= DXGI_MAX_SWAP_CHAIN_BUFFERS; i++)
-        dxgi_vk_swap_chain_push_present_id(&chain, i, 0, i * 100, true, UINT64_MAX);
+        dxgi_vk_swap_chain_push_present_id(&chain, i, 0, i * 100, true, false, UINT64_MAX);
     await_counter(&gpu_waits, 1);
     assert(!pthread_mutex_lock(&chain.wait_thread.lock));
     assert(chain.wait_thread.wait_queue_count == DXGI_MAX_SWAP_CHAIN_BUFFERS);
@@ -320,7 +326,7 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "growth"))
     {
         fill_queue();
-        dxgi_vk_swap_chain_push_present_id(&chain, 17, 0, 1700, true, UINT64_MAX);
+        dxgi_vk_swap_chain_push_present_id(&chain, 17, 0, 1700, true, false, UINT64_MAX);
         assert(!pthread_mutex_lock(&chain.wait_thread.lock));
         assert(chain.wait_thread.wait_queue_size > DXGI_MAX_SWAP_CHAIN_BUFFERS);
         assert(chain.wait_thread.wait_queue_count == 17 && allocations == 2);
@@ -369,6 +375,7 @@ int main(int argc, char **argv)
         initialize();
         chain.present.wait2 = !strcmp(argv[1], "present-wait2");
         chain.request.begin_frame_time_ns = 99;
+        chain.present.timing_id_committed = true;
         dxgi_vk_swap_chain_signal_waitable_handle(&chain, 1, true);
         await_counter(&gpu_waits, 1);
         chain.present.present_id_valid = true;
@@ -379,12 +386,16 @@ int main(int argc, char **argv)
         dxgi_vk_swap_chain_signal_waitable_handle(&chain, 3, true);
         assert(!pthread_mutex_lock(&chain.wait_thread.lock));
         assert(chain.wait_thread.wait_queue_count == 3);
+        assert(chain.wait_thread.wait_queue[0].timing_id_committed);
+        assert(!chain.wait_thread.wait_queue[1].timing_id_committed);
+        assert(chain.wait_thread.wait_queue[2].timing_id_committed);
         assert(chain.wait_thread.wait_queue[1].id == 0 && chain.wait_thread.wait_queue[1].blit_count == 41);
         assert(chain.wait_thread.wait_queue[2].id == 303 && chain.wait_thread.wait_queue[2].blit_count == UINT64_MAX);
         assert(chain.wait_thread.wait_queue[2].present_timing_enabled);
         assert(chain.wait_thread.wait_queue[2].begin_frame_time_ns == 99);
         assert(!pthread_mutex_unlock(&chain.wait_thread.lock));
         finish(3);
+        assert(timing_commits[0] && !timing_commits[1] && timing_commits[2]);
         assert(gpu_waits == 3 && delays == 1);
         assert(wait_kinds[0] == 1 && wait_values[0] == 1);
         assert(wait_kinds[1] == 2 && wait_values[1] == 41);
