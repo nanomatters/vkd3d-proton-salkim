@@ -160,6 +160,7 @@ struct present_wait_entry
     uint64_t blit_count;
     uint64_t begin_frame_time_ns;
     bool present_timing_enabled;
+    bool timing_id_committed;
 };
 
 struct present_timing_entry
@@ -277,6 +278,7 @@ struct dxgi_vk_swap_chain
         /* PresentID is used depending on features and if we're really presenting on-screen. */
         uint64_t present_id;
         bool present_id_valid;
+        bool timing_id_committed;
         bool present_target_enabled;
 
         /* Atomically updated after a PRESENT queue command has processed. Used to atomically check if
@@ -611,7 +613,8 @@ static void dxgi_vk_swap_chain_drain_queue(struct dxgi_vk_swap_chain *chain)
 
 static void dxgi_vk_swap_chain_push_present_id(struct dxgi_vk_swap_chain *chain,
         uint64_t present_count, uint64_t present_id,
-        uint64_t begin_frame_time_ns, bool present_timing_enabled, uint64_t blit_count)
+        uint64_t begin_frame_time_ns, bool present_timing_enabled, bool timing_id_committed,
+        uint64_t blit_count)
 {
     struct present_wait_entry *entry;
     pthread_mutex_lock(&chain->wait_thread.lock);
@@ -631,6 +634,7 @@ static void dxgi_vk_swap_chain_push_present_id(struct dxgi_vk_swap_chain *chain,
     entry->blit_count = blit_count;
     entry->begin_frame_time_ns = begin_frame_time_ns;
     entry->present_timing_enabled = present_timing_enabled;
+    entry->timing_id_committed = timing_id_committed;
     if (present_count)
     {
         /* Publish CPU completion only after the callback stops using its ring slot. */
@@ -660,7 +664,7 @@ static void dxgi_vk_swap_chain_cleanup_low_latency(struct dxgi_vk_swap_chain *ch
 
 static void dxgi_vk_swap_chain_cleanup_waiter_thread(struct dxgi_vk_swap_chain *chain)
 {
-    dxgi_vk_swap_chain_push_present_id(chain, 0, 0, 0, true, 0);
+    dxgi_vk_swap_chain_push_present_id(chain, 0, 0, 0, true, false, 0);
     pthread_join(chain->wait_thread.thread, NULL);
     pthread_mutex_destroy(&chain->wait_thread.lock);
     pthread_cond_destroy(&chain->wait_thread.cond);
@@ -2035,6 +2039,7 @@ static void dxgi_vk_swap_chain_destroy_swapchain_in_present_task(struct dxgi_vk_
     chain->present.backbuffer_count = 0;
     chain->present.force_swapchain_recreation = false;
     chain->present.present_id_valid = false;
+    chain->present.timing_id_committed = false;
     chain->present.present_target_enabled = false;
     chain->present.present_id = 0;
     chain->present.current_backbuffer_index = UINT32_MAX;
@@ -3700,6 +3705,11 @@ static void dxgi_vk_swap_chain_present_iteration(struct dxgi_vk_swap_chain *chai
     if (use_present_id && vr >= 0)
         chain->present.present_id_valid = true;
 
+    /* A committed telemetry ID permits polling, not presentation waits.
+     * Keep polling older reports even when the tracking ring was full. */
+    if (use_timing_id && vr >= 0)
+        chain->present.timing_id_committed = true;
+
     vkd3d_queue_timeline_trace_register_instantaneous(&chain->queue->device->queue_timeline_trace,
             VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_QUEUE_PRESENT,
             chain->present.present_id_valid ? chain->present.present_id : 0);
@@ -3731,6 +3741,7 @@ static void dxgi_vk_swap_chain_signal_waitable_handle(struct dxgi_vk_swap_chain 
     dxgi_vk_swap_chain_push_present_id(chain, present_count, present_id,
             chain->request.begin_frame_time_ns,
             chain->present.present_target_enabled,
+            completion_submitted && chain->present.timing_id_committed,
             completion_submitted ? UINT64_MAX : chain->present.internal_blit_count);
 }
 
@@ -3786,6 +3797,7 @@ static void dxgi_vk_swap_chain_present_callback(void *chain_)
 
     /* If no QueuePresentKHRs successfully commits a present ID, we'll fallback to a normal queue signal. */
     chain->present.present_id_valid = false;
+    chain->present.timing_id_committed = false;
     chain->present.present_target_enabled = false;
 
     /* A present iteration may or may not render to backbuffer. We'll apply best effort here.
@@ -4192,14 +4204,14 @@ static void dxgi_vk_swap_chain_poll_past_presentation(struct dxgi_vk_swap_chain 
 }
 
 static void dxgi_vk_swap_chain_update_frame_statistics(struct dxgi_vk_swap_chain *chain,
-        uint64_t present_count, uint64_t present_id)
+        uint64_t present_count, uint64_t present_id, bool timing_id_committed)
 {
     uint64_t time;
 
-    if (chain->present.timing && chain->present.vk_swapchain && present_id)
+    if (chain->present.timing && chain->present.vk_swapchain && (present_id || timing_id_committed))
     {
         dxgi_vk_swap_chain_poll_past_presentation(chain);
-        if (chain->frame_statistics.count < present_count)
+        if (present_id && chain->frame_statistics.count < present_count)
         {
             /* Vulkan spec does not guarantee this, but it's unclear if we are allowed to
              * skip or arbitrarily delay reports in DXGI.
@@ -4427,7 +4439,7 @@ static void *dxgi_vk_swap_chain_wait_worker(void *chain_)
         if (!entry.present_timing_enabled && entry.blit_count == UINT64_MAX)
             dxgi_vk_swap_chain_delay_next_frame(chain, end_frame_time_ns);
 
-        dxgi_vk_swap_chain_update_frame_statistics(chain, entry.present_count, entry.id);
+        dxgi_vk_swap_chain_update_frame_statistics(chain, entry.present_count, entry.id, entry.timing_id_committed);
 
         if (vkd3d_native_sync_handle_is_valid(chain->frame_latency_event))
         {
