@@ -73,6 +73,7 @@ def main():
 #define VK_STRUCTURE_TYPE_DEPENDENCY_INFO 2
 #define VK_NULL_HANDLE UINT32_MAX
 #define VK_WHOLE_SIZE UINT64_MAX
+#define VKD3D_TILE_SIZE 65536
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define max(a, b) ((a) > (b) ? (a) : (b))
@@ -278,6 +279,10 @@ static void vkCmdWriteBufferMarkerAMD(int command_buffer, unsigned int stage,
                                      capture_output=True, text=True).stdout
     else:
         source_text = args.source.read_text()
+    if "vkd3d_tracked_buffer_ranges_may_alias" in source_text:
+        harness = harness.replace("#define VK_NULL_HANDLE UINT32_MAX", "#define VK_NULL_HANDLE 0")
+        harness += "\n#define TEST_SPARSE_RANGES 1\n"
+        harness += extract_function(source_text, "vkd3d_tracked_buffer_ranges_may_alias", "static bool ")
     for name in ("d3d12_command_list_reset_transfer_waw_tracking",
                  "d3d12_command_list_resolve_transfer_waw",
                  "d3d12_command_list_mark_copy_buffer_write",
@@ -395,6 +400,17 @@ int main(int argc, char **argv)
     D3D12_WRITEBUFFERIMMEDIATE_MODE mode = D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT;
     unsigned int marker, enabled, i, j;
     bool ordering_only = argc > 1 && !strcmp(argv[1], "--ordering-only");
+
+#ifdef TEST_SPARSE_RANGES
+    assert(!vkd3d_tracked_buffer_ranges_may_alias(1, 0, 4, 2, 0, 4));
+    assert(vkd3d_tracked_buffer_ranges_may_alias(1, 0, 4, 1, 0, 4));
+    assert(!vkd3d_tracked_buffer_ranges_may_alias(0, 0, 4, 1, VKD3D_TILE_SIZE + 4, 4));
+    assert(vkd3d_tracked_buffer_ranges_may_alias(0, 0, 4, 1, VKD3D_TILE_SIZE, 4));
+    assert(vkd3d_tracked_buffer_ranges_may_alias(0, VKD3D_TILE_SIZE - 4, 8, 1, 0, 4));
+    assert(vkd3d_tracked_buffer_ranges_may_alias(1, 0, 4, 0, VKD3D_TILE_SIZE - 4, 8));
+    assert(!vkd3d_tracked_buffer_ranges_may_alias(0, VKD3D_TILE_SIZE - 4, 8, 1, 4, 4));
+    assert(vkd3d_tracked_buffer_ranges_may_alias(0, 0, VKD3D_TILE_SIZE, 1, 8, 4));
+#endif
 
     list.device = &device;
     for (enabled = ordering_only ? 2 : 0; enabled < 2; enabled++)
