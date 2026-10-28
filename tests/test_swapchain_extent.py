@@ -398,7 +398,7 @@ static void test_zero_extent(void)
         assert(eligible_recreations == 1 && chain.present.vk_swapchain);
         assert(selected_generation == 2 && completions == 3 && waiter_signals == 3);
         assert(dxgi_vk_swap_chain_get_error(&chain) == S_OK);
-        assert(timing_polls == timing && cpu_samples == 3 && chain.frame_statistics.count == 3);
+        assert(!timing_polls && cpu_samples == 3 && chain.frame_statistics.count == 3);
     }
 }
 
@@ -447,7 +447,7 @@ static void test_caps_errors(bool timing)
         assert(caps_queries == 2 && eligible_recreations == 1 && format_queries == 1 && timing_queries == 1);
         assert(drains == 1);
         assert(completions == 2 && waiter_signals == 2);
-        assert(timing_polls == (unsigned int)timing && chain.frame_statistics.count == 2);
+        assert(!timing_polls && chain.frame_statistics.count == 2);
     }
 
     for (i = 0; i < ARRAY_SIZE(terminal); i++)
@@ -505,7 +505,7 @@ static void test_format_errors(bool timing)
     assert(format_queries == 2 && timing_queries == 2 && format_selections == 2 && eligible_recreations == 1);
     assert(drains == 2);
     assert(dxgi_vk_swap_chain_get_error(&chain) == S_OK && completions == 2 && waiter_signals == 2);
-    assert(timing_polls == (unsigned int)timing && chain.frame_statistics.count == 2);
+    assert(!timing_polls && chain.frame_statistics.count == 2);
 }
 
 static void test_live_frame_statistics(void)
@@ -515,6 +515,12 @@ static void test_live_frame_statistics(void)
     chain.present.timing = true;
     report_count = 3;
     report_time = 5000;
+    /* A live swapchain without a committed present ID must not be queried. */
+    cpu_time = 4000;
+    dxgi_vk_swap_chain_update_frame_statistics(&chain, 2, 0);
+    assert(!timing_polls && cpu_samples == 1);
+    assert(chain.frame_statistics.count == 2 && chain.frame_statistics.time == 4000);
+    cpu_samples = 0;
     dxgi_vk_swap_chain_update_frame_statistics(&chain, 3, 42);
     assert(timing_polls == 1 && !cpu_samples);
     assert(chain.frame_statistics.count == 3 && chain.frame_statistics.time == 5000);
