@@ -1,5 +1,5 @@
 # Salkim modifications by Erhan Bilgili on:
-# 2026-09-01, 2026-09-29, 2026-10-04, 2026-10-10 and 2026-10-14.
+# 2026-09-01, 2026-09-29, 2026-10-04, 2026-10-10, 2026-10-14 and 2026-10-28.
 
 extension_lookup_source = custom_target('extension-lookup-source',
   input : [ 'test_extension_lookup.py', '../libs/vkd3d/device.c',
@@ -35,10 +35,12 @@ dgc_test_args = meson.get_compiler('c', native : true).get_supported_arguments([
   '-Wno-unused-parameter', '-Wno-unused-but-set-variable' ])
 
 foreach recorder : [ 'dgc_recording', 'dgc_replay', 'wbi_recording',
-                     'root_descriptor_failures', 'indirect_allocation', 'dgc_predication' ]
+                     'root_descriptor_failures', 'indirect_allocation', 'dgc_predication', 'transition_submit' ]
   recorder_inputs = [ 'test_' + recorder + '.py', '../libs/vkd3d/command.c' ]
   if recorder == 'root_descriptor_failures'
     recorder_inputs += [ 'test_dgc_recording.py' ]
+  elif recorder == 'transition_submit'
+    recorder_inputs += [ '../libs/vkd3d/vkd3d_private.h' ]
   endif
   recorder_source = custom_target(recorder + '-source',
     input : recorder_inputs,

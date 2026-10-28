@@ -1,7 +1,7 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
  * 2026-09-01, 2026-09-12, 2026-09-18, 2026-09-19, 2026-09-26,
- * 2026-10-03, 2026-10-10.
+ * 2026-10-03, 2026-10-10, 2026-10-28.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -3775,6 +3775,7 @@ struct d3d12_command_queue_submission_signal
 struct d3d12_command_queue_submission_execute
 {
     VkCommandBufferSubmitInfo *cmd;
+    VkCommandBufferSubmitInfo *cmd_storage; /* Includes a reserved slot before cmd for initial transitions. */
     uint32_t *cmd_cost; /* Stored after cmd in the same allocation. */
     struct d3d12_command_allocator **command_allocators;
     UINT cmd_count;

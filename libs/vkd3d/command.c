@@ -1,7 +1,7 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
  * 2026-09-11, 2026-09-12, 2026-09-18, 2026-09-26, 2026-09-29, 2026-09-30,
- * 2026-10-10.
+ * 2026-10-10, 2026-10-28.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -23938,6 +23938,17 @@ static uint64_t d3d12_command_queue_latency_frame_id(struct d3d12_command_queue 
     return id;
 }
 
+static bool d3d12_command_queue_allocate_command_buffers(struct d3d12_command_queue_submission_execute *exec,
+        size_t count)
+{
+    /* Reserve a leading slot to merge initial transitions without copying command buffers. */
+    if (!(exec->cmd_storage = vkd3d_calloc(count + 1, sizeof(*exec->cmd) + sizeof(*exec->cmd_cost))))
+        return false;
+    exec->cmd = exec->cmd_storage + 1;
+    exec->cmd_cost = (uint32_t *)(exec->cmd + count);
+    return true;
+}
+
 VKD3D_METHODENTRY(void) d3d12_command_queue_ExecuteCommandLists(ID3D12CommandQueue *iface,
         UINT command_list_count, ID3D12CommandList * const *command_lists)
 {
@@ -24035,18 +24046,18 @@ VKD3D_METHODENTRY(void) d3d12_command_queue_ExecuteCommandLists(ID3D12CommandQue
             num_command_buffers++;
     }
 
-    /* The command buffer and cost arrays share the submission lifetime. */
-    if (!(buffers = vkd3d_calloc(num_command_buffers, sizeof(*buffers) + sizeof(*cmd_cost))))
+    if (!d3d12_command_queue_allocate_command_buffers(&sub.execute, num_command_buffers))
     {
         ERR("Failed to allocate command buffer arrays.\n");
         return;
     }
-    cmd_cost = (uint32_t *)(buffers + num_command_buffers);
+    buffers = sub.execute.cmd;
+    cmd_cost = sub.execute.cmd_cost;
 
     if (!(allocators = vkd3d_calloc(command_list_count, sizeof(*allocators))))
     {
         ERR("Failed to allocate outstanding submissions count.\n");
-        vkd3d_free(buffers);
+        vkd3d_free(sub.execute.cmd_storage);
         return;
     }
 
@@ -24125,7 +24136,7 @@ VKD3D_METHODENTRY(void) d3d12_command_queue_ExecuteCommandLists(ID3D12CommandQue
             }
 
             vkd3d_free(allocators);
-            vkd3d_free(buffers);
+            vkd3d_free(sub.execute.cmd_storage);
 #ifdef VKD3D_ENABLE_BREADCRUMBS
             vkd3d_free(breadcrumb_indices);
 #endif
@@ -25306,11 +25317,12 @@ static void d3d12_command_queue_init_query_heap(struct d3d12_device *device, VkC
 
 static void d3d12_command_queue_transition_pool_build(struct d3d12_command_queue_transition_pool *pool,
         struct d3d12_device *device, const struct vkd3d_initial_transition *transitions, size_t count,
-        bool fallback, VkCommandBuffer *vk_cmd_buffer, uint64_t *timeline_value)
+        bool fallback, bool merge, VkCommandBuffer *vk_cmd_buffer, uint64_t *timeline_value)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     const struct vkd3d_initial_transition *transition;
     VkCommandBufferBeginInfo begin_info;
+    VkMemoryBarrier2 memory_barrier;
     unsigned int command_index;
     VkDependencyInfo dep_info;
     uint32_t need_transition;
@@ -25382,6 +25394,18 @@ static void d3d12_command_queue_transition_pool_build(struct d3d12_command_queue
     dep_info.imageMemoryBarrierCount = pool->barriers_count;
     dep_info.pImageMemoryBarriers = pool->barriers;
 
+    if (merge)
+    {
+        /* Replace the transition semaphore's dependency with barriers in the merged batch. */
+        for (i = 0; i < pool->barriers_count; i++)
+        {
+            pool->barriers[i].srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            pool->barriers[i].srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+            pool->barriers[i].dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            pool->barriers[i].dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+        }
+    }
+
     if (VKD3D_CONFIG_FLAG_IS_SET(INSTRUCTION_QA_CHECKS))
     {
         /* Every ExecuteCommandLists is an implicit barrier, so flush the bloom filter automatically. */
@@ -25404,6 +25428,22 @@ static void d3d12_command_queue_transition_pool_build(struct d3d12_command_queue
 
     for (i = 0; i < pool->query_heaps_count; i++)
         d3d12_command_queue_init_query_heap(device, cmd, pool->query_heaps[i]);
+
+    if (merge && (qa_checks || pool->query_heaps_count))
+    {
+        memset(&memory_barrier, 0, sizeof(memory_barrier));
+        memory_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        memory_barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        memory_barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+        memory_barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        memory_barrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+
+        memset(&dep_info, 0, sizeof(dep_info));
+        dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep_info.memoryBarrierCount = 1;
+        dep_info.pMemoryBarriers = &memory_barrier;
+        VK_CALL(vkCmdPipelineBarrier2(cmd, &dep_info));
+    }
     VK_CALL(vkEndCommandBuffer(cmd));
 
     *vk_cmd_buffer = cmd;
@@ -25544,10 +25584,17 @@ unlock:
     return ret;
 }
 
+static bool d3d12_command_queue_can_merge_transition(
+        const struct d3d12_command_queue_submission_execute *exec, const VkCommandBufferSubmitInfo *transition_cmd)
+{
+    return exec->cmd_count && !exec->split_submission &&
+            transition_cmd->deviceMask == VKD3D_COMMAND_BUFFER_SUBMIT_INFO_DEVICE_MASK_DEFAULT;
+}
+
 static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queue,
         const struct d3d12_command_queue_submission_execute *exec,
         VkCommandBufferSubmitInfo *transition_cmd,
-        const VkSemaphoreSubmitInfo *transition_semaphore)
+        const VkSemaphoreSubmitInfo *transition_semaphore, bool merge_transition)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &command_queue->device->vk_procs;
     struct vkd3d_queue *vkd3d_queue = command_queue->vkd3d_queue;
@@ -25555,7 +25602,7 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
     VkLatencySubmissionPresentIdNV latency_submit_present_info;
     VkSemaphoreSubmitInfo transition_wait_semaphore_info;
     struct dxgi_vk_swap_chain *low_latency_swapchain;
-    VkSemaphoreSubmitInfo signal_semaphore_infos[2];
+    VkSemaphoreSubmitInfo signal_semaphore_infos[3];
     VkSemaphoreSubmitInfo *binary_semaphore_info;
     bool stagger_submissions, is_first, is_last;
     VkSemaphoreSubmitInfo wait_semaphore_info;
@@ -25611,7 +25658,7 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
     num_submits = 0;
     serialize_transition = false;
 
-    if (transition_cmd->commandBuffer)
+    if (transition_cmd->commandBuffer && !merge_transition)
     {
         /* The transition cmd must happen in-order, since with the advanced aliasing model in D3D12,
          * it is enough to separate aliases with an ExecuteCommandLists.
@@ -25724,8 +25771,21 @@ static void d3d12_command_queue_execute(struct d3d12_command_queue *command_queu
 
         if (transition_cmd->commandBuffer && is_first)
         {
-            submit->waitSemaphoreInfoCount = 1;
-            submit->pWaitSemaphoreInfos = transition_semaphore;
+            if (merge_transition)
+            {
+                assert(!fallback && !exec->split_submission);
+                assert(exec->cmd == exec->cmd_storage + 1);
+                exec->cmd_storage[0] = *transition_cmd;
+                submit->pCommandBufferInfos = exec->cmd_storage;
+                submit->commandBufferInfoCount++;
+                /* Keep the pool's retirement signal even though the internal wait is gone. */
+                signal_semaphore_infos[submit->signalSemaphoreInfoCount++] = *transition_semaphore;
+            }
+            else
+            {
+                submit->waitSemaphoreInfoCount = 1;
+                submit->pWaitSemaphoreInfos = transition_semaphore;
+            }
         }
         else if (need_fallback_wait_semaphore)
         {
@@ -26454,6 +26514,7 @@ static void *d3d12_command_queue_submission_worker_main(void *userdata)
     struct d3d12_command_queue *queue = userdata;
     VkSemaphoreSubmitInfo transition_semaphore;
     VkCommandBufferSubmitInfo transition_cmd;
+    bool merge_transition;
     VKD3D_UNUSED unsigned int i;
     HRESULT hr;
 
@@ -26532,20 +26593,24 @@ static void *d3d12_command_queue_submission_worker_main(void *userdata)
             if (d3d12_command_queue_exec_submit_needs_fallback_queue(queue, &submission.execute))
                 transition_cmd.deviceMask = VKD3D_COMMAND_BUFFER_SUBMIT_INFO_DEVICE_MASK_FALLBACK_QUEUE;
 
+            merge_transition = d3d12_command_queue_can_merge_transition(&submission.execute, &transition_cmd);
+
             d3d12_command_queue_transition_pool_build(&pool, queue->device,
                     submission.execute.transitions,
                     submission.execute.transition_count,
                     transition_cmd.deviceMask != VKD3D_COMMAND_BUFFER_SUBMIT_INFO_DEVICE_MASK_DEFAULT,
+                    merge_transition,
                     &transition_cmd.commandBuffer,
                     &transition_semaphore.value);
 
-            d3d12_command_queue_execute(queue, &submission.execute, &transition_cmd, &transition_semaphore);
+            d3d12_command_queue_execute(queue, &submission.execute, &transition_cmd, &transition_semaphore,
+                    merge_transition);
 
             /* command_queue_execute takes ownership of the
              * outstanding_submission_counters and queue_timeline_indices allocations.
              * The atomic counters are decremented when the submission is observed to be freed.
              * On error, the counters are freed early, so there is no risk of leak. */
-            vkd3d_free(submission.execute.cmd);
+            vkd3d_free(submission.execute.cmd_storage);
             vkd3d_free(submission.execute.transitions);
 #ifdef VKD3D_ENABLE_BREADCRUMBS
             for (i = 0; i < submission.execute.breadcrumb_indices_count; i++)
