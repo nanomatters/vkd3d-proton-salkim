@@ -101,6 +101,18 @@ queue_activity_test = executable('queue-activity', queue_activity_source,
   install : false)
 test('queue-activity', queue_activity_test, timeout : 15)
 
+queue_selection_source = custom_target('queue-selection-source',
+  input : [ 'test_queue_selection.py', '../libs/vkd3d/device.c',
+            '../libs/vkd3d/vkd3d_private.h', 'test_queue_activity.py' ],
+  output : 'queue_selection.c',
+  command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
+queue_selection_test = executable('queue-selection', queue_selection_source,
+  native : true,
+  include_directories : vkd3d_external_includes,
+  c_args : dgc_test_args,
+  install : false)
+test('queue-selection', queue_selection_test, timeout : 15)
+
 vkd3d_test_flags = []
 vkd3d_test_deps = [ lib_d3d12, vkd3d_common_dep ]
 if vkd3d_platform == 'windows'

@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def function(source, name):
-    match = re.search(r"^(?:static )?(?:bool|void|unsigned int|struct vkd3d_queue \*)\s*" + name
+    match = re.search(r"^(?:static )?(?:bool|void|unsigned int|uint32_t|HRESULT|struct vkd3d_queue \*)\s*" + name
                       + r"\([^;]+?\)\s*\{", source, re.M)
     if not match:
         raise ValueError("Missing source function: " + name)
@@ -145,8 +145,8 @@ static void check_activity(bool stagger, unsigned int locks)
     assert(lock_calls == locks && unlock_calls == locks);
 }
 
-static struct vkd3d_queue graphics[3];
-static struct vkd3d_queue *graphics_ptrs[] = { &graphics[0], &graphics[1], &graphics[2] };
+static struct vkd3d_queue graphics[7];
+static struct vkd3d_queue *graphics_ptrs[7];
 static struct vkd3d_queue_family_info family;
 static struct d3d12_command_queue clients[16];
 static unsigned int client_count;
@@ -156,9 +156,10 @@ static void placement_init(unsigned int queue_count, unsigned int flags)
     reset();
     memset(graphics, 0, sizeof(graphics));
     memset(clients, 0, sizeof(clients));
-    for (unsigned int i = 0; i < 3; i++)
+    for (unsigned int i = 0; i < sizeof(graphics) / sizeof(graphics[0]); i++)
     {
         assert(!pthread_mutex_init(&graphics[i].command_queue_mutex, NULL));
+        graphics_ptrs[i] = &graphics[i];
         graphics[i].vk_queue_index = i;
         graphics[i].vk_family_index = 7;
         graphics[i].vk_queue_flags = VK_QUEUE_GRAPHICS_BIT;
@@ -190,7 +191,7 @@ static void placement_finish(void)
     for (unsigned int i = 0; i < client_count; i++)
         if (clients[i].vkd3d_queue)
             d3d12_device_unmap_vkd3d_queue(clients[i].vkd3d_queue, &clients[i]);
-    for (unsigned int i = 0; i < 3; i++)
+    for (unsigned int i = 0; i < sizeof(graphics) / sizeof(graphics[0]); i++)
     {
         assert(!graphics[i].virtual_queue_count && !graphics[i].command_queue_count);
         free(graphics[i].command_queues);
@@ -318,6 +319,18 @@ static void test_exclusive_without_staggering(void)
     placement_finish();
 }
 
+static void test_fifth_direct_queue(unsigned int flags)
+{
+    struct d3d12_command_queue *present;
+    placement_init(7, flags);
+    for (unsigned int i = 0; i < 4; i++)
+        allocate(i)->desc.Priority = 0;
+    present = allocate(4);
+    assert(present->vkd3d_queue != clients[0].vkd3d_queue);
+    assert(present->desc.Priority == 100);
+    placement_finish();
+}
+
 int main(void)
 {
     assert(!pthread_mutex_init(&native.command_queue_mutex, NULL));
@@ -361,7 +374,9 @@ int main(void)
     test_unmap_and_internal();
     test_single_queue();
     test_exclusive_without_staggering();
-    puts("Queue activity and placement: 15 cases passed.");
+    test_fifth_direct_queue(0);
+    test_fifth_direct_queue(QUEUE_ACTIVITY);
+    puts("Queue activity and placement: 17 cases passed.");
     return 0;
 }
 '''

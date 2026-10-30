@@ -2987,11 +2987,12 @@ out_destroy_queues:
 }
 
 #define VKD3D_MAX_QUEUE_COUNT_PER_FAMILY (4u)
+#define VKD3D_MAX_GRAPHICS_QUEUE_COUNT (7u)
 
-/* The queue priorities list contains VKD3D_MAX_QUEUE_COUNT_PER_FAMILY + 1 priorities
- * because it is possible for low latency to add an additional queue for out of band work
- * submission. */
-static float queue_priorities[] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+/* Keep one extra priority for the optional out of band queue. */
+static float queue_priorities[] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+STATIC_ASSERT(ARRAY_SIZE(queue_priorities) > VKD3D_MAX_QUEUE_COUNT_PER_FAMILY);
+STATIC_ASSERT(ARRAY_SIZE(queue_priorities) > VKD3D_MAX_GRAPHICS_QUEUE_COUNT);
 
 static uint32_t vkd3d_find_queue(unsigned int count, const VkQueueFamilyProperties *properties,
         VkQueueFlags mask, VkQueueFlags flags)
@@ -3043,7 +3044,7 @@ static HRESULT vkd3d_select_queues(const struct d3d12_device *device,
     VkQueueFamilyProperties *queue_properties = NULL;
     VkDeviceQueueCreateInfo *queue_info = NULL;
     bool duplicate, single_queue;
-    unsigned int i, j;
+    unsigned int i, j, max_queue_count;
     uint32_t count;
 
     memset(info, 0, sizeof(*info));
@@ -3118,7 +3119,9 @@ static HRESULT vkd3d_select_queues(const struct d3d12_device *device,
         queue_info->pNext = NULL;
         queue_info->flags = 0;
         queue_info->queueFamilyIndex = info->family_index[i];
-        queue_info->queueCount = min(info->vk_properties[i].queueCount, VKD3D_MAX_QUEUE_COUNT_PER_FAMILY);
+        max_queue_count = i == VKD3D_QUEUE_FAMILY_GRAPHICS ?
+                VKD3D_MAX_GRAPHICS_QUEUE_COUNT : VKD3D_MAX_QUEUE_COUNT_PER_FAMILY;
+        queue_info->queueCount = min(info->vk_properties[i].queueCount, max_queue_count);
         queue_info->pQueuePriorities = queue_priorities;
 
         if (single_queue)
