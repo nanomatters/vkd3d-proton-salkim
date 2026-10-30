@@ -1,5 +1,5 @@
 # Salkim modifications by Erhan Bilgili on:
-# 2026-09-01, 2026-09-29, 2026-10-04, 2026-10-10 and 2026-10-14.
+# 2026-09-01, 2026-09-29, 2026-10-04, 2026-10-10, 2026-10-14 and 2026-10-30.
 
 extension_lookup_source = custom_target('extension-lookup-source',
   input : [ 'test_extension_lookup.py', '../libs/vkd3d/device.c',
@@ -85,6 +85,30 @@ foreach recorder : [ 'swapchain_extent', 'swapchain_wait_queue', 'swapchain_timi
     test(recorder, recorder_test, timeout : 15)
   endif
 endforeach
+
+queue_placement_source = custom_target('queue-placement-source',
+  input : [ 'test_queue_placement.py', '../libs/vkd3d/command.c', '../libs/vkd3d-common/memory.c' ],
+  output : 'queue_placement.c',
+  command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
+queue_placement_test = executable('queue-placement', queue_placement_source,
+  native : true,
+  dependencies : dependency('threads', native : true),
+  include_directories : vkd3d_private_includes,
+  c_args : dgc_test_args,
+  install : false)
+test('queue-placement', queue_placement_test, timeout : 15)
+
+queue_selection_source = custom_target('queue-selection-source',
+  input : [ 'test_queue_selection.py', '../libs/vkd3d/device.c',
+            '../libs/vkd3d/vkd3d_private.h', 'test_queue_placement.py' ],
+  output : 'queue_selection.c',
+  command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
+queue_selection_test = executable('queue-selection', queue_selection_source,
+  native : true,
+  include_directories : vkd3d_external_includes,
+  c_args : dgc_test_args,
+  install : false)
+test('queue-selection', queue_selection_test, timeout : 15)
 
 vkd3d_test_flags = []
 vkd3d_test_deps = [ lib_d3d12, vkd3d_common_dep ]
