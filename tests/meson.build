@@ -1,5 +1,5 @@
 # Salkim modifications by Erhan Bilgili on:
-# 2026-09-01, 2026-09-29, 2026-10-04, 2026-10-10, 2026-10-14 and 2026-10-28.
+# 2026-09-01, 2026-09-29, 2026-10-04, 2026-10-10, 2026-10-14, 2026-10-28 and 2026-10-30.
 
 extension_lookup_source = custom_target('extension-lookup-source',
   input : [ 'test_extension_lookup.py', '../libs/vkd3d/device.c',
@@ -87,6 +87,18 @@ foreach recorder : [ 'swapchain_extent', 'swapchain_wait_queue', 'swapchain_timi
     test(recorder, recorder_test, timeout : 15)
   endif
 endforeach
+
+queue_activity_source = custom_target('queue-activity-source',
+  input : [ 'test_queue_activity.py', '../libs/vkd3d/command.c', '../libs/vkd3d/vkd3d_private.h' ],
+  output : 'queue_activity.c',
+  command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
+queue_activity_test = executable('queue-activity', queue_activity_source,
+  native : true,
+  dependencies : dependency('threads', native : true),
+  include_directories : vkd3d_private_includes,
+  c_args : dgc_test_args,
+  install : false)
+test('queue-activity', queue_activity_test, timeout : 15)
 
 vkd3d_test_flags = []
 vkd3d_test_deps = [ lib_d3d12, vkd3d_common_dep ]

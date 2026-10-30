@@ -1,7 +1,7 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
  * 2026-09-11, 2026-09-12, 2026-09-18, 2026-09-26, 2026-09-29, 2026-09-30,
- * 2026-10-10, 2026-10-28.
+ * 2026-10-10, 2026-10-28, 2026-10-30.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -25525,6 +25525,11 @@ static bool d3d12_command_queue_needs_staggered_submissions(struct d3d12_command
     bool ret = false;
     unsigned int i;
 
+    /* Track execution even when this queue does not need staggering. */
+    current_time_ns = vkd3d_get_current_time_ns();
+    vkd3d_atomic_uint64_store_explicit(&command_queue->last_submission_time_ns,
+            current_time_ns, vkd3d_memory_order_relaxed);
+
     if (VKD3D_CONFIG_FLAG_IS_SET(NO_STAGGERED_SUBMIT))
         return false;
 
@@ -25536,12 +25541,6 @@ static bool d3d12_command_queue_needs_staggered_submissions(struct d3d12_command
 
     if (command_queue->vkd3d_queue->command_queue_count == 1)
         goto unlock;
-
-    current_time_ns = vkd3d_get_current_time_ns();
-
-    /* Make sure current command queue is recognized as busy */
-    vkd3d_atomic_uint64_store_explicit(&command_queue->last_submission_time_ns,
-            current_time_ns, vkd3d_memory_order_relaxed);
 
     /* Do not stagger submissions for the highest-priority active queue. */
     max_priority = command_queue->desc.Priority;
