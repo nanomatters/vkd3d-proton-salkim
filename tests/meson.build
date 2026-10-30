@@ -89,7 +89,8 @@ foreach recorder : [ 'swapchain_extent', 'swapchain_wait_queue', 'swapchain_timi
 endforeach
 
 queue_activity_source = custom_target('queue-activity-source',
-  input : [ 'test_queue_activity.py', '../libs/vkd3d/command.c', '../libs/vkd3d/vkd3d_private.h' ],
+  input : [ 'test_queue_activity.py', '../libs/vkd3d/command.c',
+            '../libs/vkd3d/vkd3d_private.h', '../libs/vkd3d-common/memory.c' ],
   output : 'queue_activity.c',
   command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
 queue_activity_test = executable('queue-activity', queue_activity_source,

@@ -3065,24 +3065,58 @@ struct vkd3d_queue_family_info *d3d12_device_get_vkd3d_queue_family(struct d3d12
     }
 }
 
+static unsigned int vkd3d_queue_get_active_count(const struct vkd3d_queue *queue, uint64_t current_time_ns)
+{
+    /* Internal queues have no activity timestamps, so count them as active. */
+    unsigned int count = queue->virtual_queue_count - queue->command_queue_count;
+    uint64_t submission_time_ns;
+    size_t i;
+
+    for (i = 0; i < queue->command_queue_count; i++)
+    {
+        submission_time_ns = vkd3d_atomic_uint64_load_explicit(
+                &queue->command_queues[i]->last_submission_time_ns, vkd3d_memory_order_relaxed);
+        /* A submit can update the timestamp after the allocation snapshot. */
+        if (submission_time_ns && (submission_time_ns >= current_time_ns ||
+                current_time_ns - submission_time_ns < VKD3D_QUEUE_INACTIVE_THRESHOLD_NS))
+            count++;
+    }
+
+    return count;
+}
+
 struct vkd3d_queue *d3d12_device_allocate_vkd3d_queue(struct vkd3d_queue_family_info *queue_family,
         struct d3d12_command_queue *command_queue)
 {
+    unsigned int active_count, candidate_active_count, i;
+    uint64_t current_time_ns = 0;
     struct vkd3d_queue *queue;
-    unsigned int i;
+    bool use_activity;
+
+    use_activity = command_queue && queue_family->queue_count > 1 &&
+            VKD3D_CONFIG_FLAG_IS_SET(QUEUE_ACTIVITY);
 
     for (i = 0; i < queue_family->queue_count; i++)
         pthread_mutex_lock(&queue_family->queues[i]->command_queue_mutex);
 
-    /* Select the queue that has the lowest number of virtual queues mapped
-     * to it, in order to avoid situations where we map multiple queues to
-     * the same vkd3d queue while others are unused */
+    if (use_activity)
+        current_time_ns = vkd3d_get_current_time_ns();
+
+    /* Prefer fewer active queues when requested, then fewer assigned queues. */
     queue = queue_family->queues[0];
+    active_count = use_activity ? vkd3d_queue_get_active_count(queue, current_time_ns) : 0;
 
     for (i = 1; i < queue_family->queue_count; i++)
     {
-        if (queue_family->queues[i]->virtual_queue_count < queue->virtual_queue_count)
+        candidate_active_count = use_activity ?
+                vkd3d_queue_get_active_count(queue_family->queues[i], current_time_ns) : 0;
+        if (candidate_active_count < active_count ||
+                (candidate_active_count == active_count &&
+                queue_family->queues[i]->virtual_queue_count < queue->virtual_queue_count))
+        {
             queue = queue_family->queues[i];
+            active_count = candidate_active_count;
+        }
     }
 
     queue->virtual_queue_count++;
@@ -3097,6 +3131,11 @@ struct vkd3d_queue *d3d12_device_allocate_vkd3d_queue(struct vkd3d_queue_family_
 
     for (i = 0; i < queue_family->queue_count; i++)
         pthread_mutex_unlock(&queue_family->queues[i]->command_queue_mutex);
+
+    if (command_queue && VKD3D_CONFIG_FLAG_IS_SET(QUEUE_ACTIVITY))
+        INFO("Mapped command queue %p, type %u, priority %d to Vulkan queue %u in family %u.\n",
+                command_queue, command_queue->desc.Type, command_queue->desc.Priority,
+                queue->vk_queue_index, queue->vk_family_index);
 
     return queue;
 }

@@ -208,6 +208,8 @@ commas or semicolons.
     - `dxr12` - Enables experimental support for DXR 1.2 if `VK_EXT_opacity_micromap` is available.
     - `force_static_cbv` - Unsafe speed hack on NVIDIA. May or may not give a significant performance uplift.
     - `single_queue` - Do not use asynchronous compute or transfer queues.
+    - `queue_activity` - Experimental queue placement based on recent submission activity.
+      Applied at queue creation only. Logs the selected Vulkan queue for each D3D12 queue.
     - `no_upload_hvv` - Blocks any attempt to use host-visible VRAM (large/resizable BAR) for the UPLOAD heap.
       May free up vital VRAM in certain critical situations, at cost of lower GPU performance.
       A fraction of VRAM is reserved for resizable BAR allocations either way,
