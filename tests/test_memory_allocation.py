@@ -300,15 +300,40 @@ static void run_locking(void)
     }
 }
 
+static void run_candidates(void)
+{
+    const struct test_case tests[] = {
+        {"Device-local preference", MEMORY_DEVICE, TYPES_ALL, 0, 32, 64, true, false, 0, 1, {0}},
+        {"System-memory preference", 0, TYPES_ALL, 0, 32, 64, false, false, 1, 1, {1}},
+        {"System fallback after VRAM failure", MEMORY_DEVICE, TYPES_ALL, TYPE_DEVICE, 32, 64, true, false, 1, 2, {0, 1}},
+        {"Pageable memory avoids fallback", MEMORY_DEVICE, TYPES_ALL, TYPE_DEVICE, 32, 64, true, true, -1, 1, {0}},
+        {"UMA keeps host-visible device memory", MEMORY_DEVICE, TYPE_REBAR, 0, 32, 64, true, false, 2, 1, {2}},
+        {"Device-only memory remains valid", 0, TYPE_DEVICE, 0, 32, 64, false, false, 0, 1, {0}},
+        {"Host-only memory remains valid", 0, TYPE_SYSTEM, 0, 32, 64, false, false, 1, 1, {1}},
+        {"Missing optional device-local flag", MEMORY_REBAR, TYPE_SYSTEM, 0, 32, 64, false, false, 1, 1, {1}},
+        {"Missing optional cached flag", MEMORY_SYSTEM, TYPE_REBAR, 0, 32, 64, false, false, 2, 1, {2}},
+        {"No host-visible memory", MEMORY_HOST, TYPE_DEVICE, 0, 32, 64, false, false, -1, 0, {0}},
+        {"Empty type mask", MEMORY_DEVICE, 0, 0, 32, 64, true, false, -1, 0, {0}},
+    };
+    respect_budget = true;
+    for (unsigned int log = 0; log < 2; log++)
+    {
+        logging = log;
+        for (unsigned int i = 0; i < sizeof(tests) / sizeof(*tests); i++)
+            run_case(&tests[i]);
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) return 2;
-    if (strcmp(argv[1], "all") && strcmp(argv[1], "locking"))
+    if (strcmp(argv[1], "all") && strcmp(argv[1], "locking") && strcmp(argv[1], "candidates"))
     {
         fprintf(stderr, "Unknown test group: %s\n", argv[1]);
         return 2;
     }
     if (!strcmp(argv[1], "all") || !strcmp(argv[1], "locking")) run_locking();
+    if (!strcmp(argv[1], "all") || !strcmp(argv[1], "candidates")) run_candidates();
     printf("Memory allocation: %u cases and %u checks passed (%s).\n", cases, checks, argv[1]);
     return 0;
 }
@@ -322,7 +347,7 @@ def main():
     parser.add_argument("--revision", help="read memory.c from a Git revision for a negative control")
     parser.add_argument("--build-dir", type=Path)
     parser.add_argument("--generate", type=Path)
-    parser.add_argument("--group", choices=("all", "locking"), default="all")
+    parser.add_argument("--group", choices=("all", "locking", "candidates"), default="all")
     parser.add_argument("--sanitize", action="store_true")
     args = parser.parse_args()
     if not args.generate and not args.build_dir:
