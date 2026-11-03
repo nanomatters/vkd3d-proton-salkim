@@ -1010,9 +1010,9 @@ static HRESULT vkd3d_try_allocate_device_memory(struct d3d12_device *device,
     if (!(type_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && (candidate_mask != device_local_mask))
         candidate_mask &= ~device_local_mask;
 
-    /* If host-visible memory is not explicitly requested and the candidate mask covers device-only memory,
+    /* If host-visible memory is not explicitly requested and the remaining candidates include device-only memory,
      * ensure that we don't accidentally use HVV / PCI-e BAR for pure device-local allocations. */
-    if (!(type_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && (candidate_mask != host_visible_mask))
+    if (!(type_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && (candidate_mask & ~host_visible_mask))
         candidate_mask &= ~host_visible_mask;
 
     if (!candidate_mask)
