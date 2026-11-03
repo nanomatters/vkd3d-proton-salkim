@@ -119,7 +119,7 @@ memory_allocation_test = executable('memory-allocation', memory_allocation_sourc
   dependencies : dependency('threads', native : true),
   c_args : dgc_test_args,
   install : false)
-foreach allocation_case : [ 'locking' ]
+foreach allocation_case : [ 'locking', 'candidates' ]
   test('memory-allocation-' + allocation_case, memory_allocation_test,
     args : [ allocation_case ], timeout : 10)
 endforeach
