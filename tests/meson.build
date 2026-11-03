@@ -1,5 +1,5 @@
 # Salkim modifications by Erhan Bilgili on:
-# 2026-09-01, 2026-09-29, 2026-10-04, 2026-10-10, 2026-10-14 and 2026-10-30.
+# 2026-09-01, 2026-09-29, 2026-10-04, 2026-10-10, 2026-10-14, 2026-10-30 and 2026-11-03.
 
 extension_lookup_source = custom_target('extension-lookup-source',
   input : [ 'test_extension_lookup.py', '../libs/vkd3d/device.c',
@@ -109,6 +109,20 @@ queue_selection_test = executable('queue-selection', queue_selection_source,
   c_args : dgc_test_args,
   install : false)
 test('queue-selection', queue_selection_test, timeout : 15)
+
+memory_allocation_source = custom_target('memory-allocation-source',
+  input : [ 'test_memory_allocation.py', '../libs/vkd3d/memory.c' ],
+  output : 'memory_allocation.c',
+  command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
+memory_allocation_test = executable('memory-allocation', memory_allocation_source,
+  native : true,
+  dependencies : dependency('threads', native : true),
+  c_args : dgc_test_args,
+  install : false)
+foreach allocation_case : [ 'locking' ]
+  test('memory-allocation-' + allocation_case, memory_allocation_test,
+    args : [ allocation_case ], timeout : 10)
+endforeach
 
 vkd3d_test_flags = []
 vkd3d_test_deps = [ lib_d3d12, vkd3d_common_dep ]
