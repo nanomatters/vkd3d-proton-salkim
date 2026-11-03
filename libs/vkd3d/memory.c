@@ -1,4 +1,6 @@
 /*
+ * Salkim modifications by Erhan Bilgili on 2026-11-03.
+ *
  * Copyright 2021 Philip Rebohle for Valve Corporation
  *
  * This library is free software; you can redistribute it and/or
@@ -1132,7 +1134,8 @@ static HRESULT vkd3d_try_allocate_device_memory(struct d3d12_device *device,
     {
         type_current = &memory_info->type_current[allocate_info.memoryTypeIndex];
 
-        if (!rebar_budget || !respect_budget)
+        /* Only a successful budgeted ReBAR allocation retains the lock. */
+        if (vr != VK_SUCCESS || !rebar_budget || !respect_budget)
             pthread_mutex_lock(&memory_info->budget_lock);
 
         if (vr == VK_SUCCESS)
