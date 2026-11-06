@@ -67,6 +67,19 @@ foreach recorder : [ 'dgc_recording', 'dgc_replay', 'wbi_recording',
   endif
 endforeach
 
+descriptor_heap_policy_source = custom_target('descriptor-heap-policy-source',
+  input : [ 'test_descriptor_heap_policy.py', '../libs/vkd3d/device_workarounds.c',
+            '../libs/vkd3d/device.c', '../libs/vkd3d/vkd3d_private.h',
+            '../include/private/config_flags.h', '../include/private/config_flag_decl.h' ],
+  output : 'descriptor_heap_policy.c',
+  command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
+descriptor_heap_policy_test = executable('descriptor_heap_policy', descriptor_heap_policy_source,
+  native : true,
+  include_directories : vkd3d_external_includes,
+  c_args : dgc_test_args,
+  install : false)
+test('descriptor_heap_policy', descriptor_heap_policy_test, timeout : 10)
+
 foreach recorder : [ 'swapchain_extent', 'swapchain_wait_queue', 'swapchain_timing' ]
   recorder_inputs = [ 'test_' + recorder + '.py', '../libs/vkd3d/swapchain.c' ]
   if recorder == 'swapchain_wait_queue'
