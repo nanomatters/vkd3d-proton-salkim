@@ -214,6 +214,8 @@ commas or semicolons.
     - `dxr12` - Enables experimental support for DXR 1.2 if `VK_EXT_opacity_micromap` is available.
     - `force_static_cbv` - Unsafe speed hack on NVIDIA. May or may not give a significant performance uplift.
     - `single_queue` - Do not use asynchronous compute or transfer queues.
+    - `descriptor_heap` - Enables `VK_EXT_descriptor_heap` on NVIDIA drivers older than 620.70.06 when supported.
+    - `no_descriptor_heap` - Disables `VK_EXT_descriptor_heap`, taking precedence over `descriptor_heap`.
     - `no_upload_hvv` - Blocks any attempt to use host-visible VRAM (large/resizable BAR) for the UPLOAD heap.
       May free up vital VRAM in certain critical situations, at cost of lower GPU performance.
       A fraction of VRAM is reserved for resizable BAR allocations either way,
