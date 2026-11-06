@@ -7648,6 +7648,7 @@ void test_misaligned_root_desc_dxil(void)
 
 void test_descriptor_heap_rebind_invalidation(void)
 {
+    D3D12_SHADER_RESOURCE_VIEW_DESC null_srv;
     struct test_context_desc context_desc;
     D3D12_DESCRIPTOR_RANGE rs_range[3];
     D3D12_ROOT_SIGNATURE_DESC rs_desc;
@@ -7664,8 +7665,7 @@ void test_descriptor_heap_rebind_invalidation(void)
     ID3D12Resource *tex2;
     ID3D12Resource *tex3;
     bool is_amd_windows;
-    bool is_nv_windows;
-    unsigned int x, y;
+    unsigned int i, x, y;
 
 #include "shaders/descriptors/headers/heap_rebind_invalidation.h"
 
@@ -7716,7 +7716,6 @@ void test_descriptor_heap_rebind_invalidation(void)
     output = create_default_buffer(context.device, 64 * 1024, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
 
     is_amd_windows = is_amd_windows_device(context.device);
-    is_nv_windows = is_nvidia_windows_device(context.device);
 
     {
         const float data1[2][2] = { { 1, 2 }, { 3, 4 } };
@@ -7752,6 +7751,17 @@ void test_descriptor_heap_rebind_invalidation(void)
     ID3D12Device_CreateShaderResourceView(context.device, tex1, NULL, get_cpu_descriptor_handle(&context, heap2, 1));
     ID3D12Device_CreateShaderResourceView(context.device, tex2, NULL, get_cpu_descriptor_handle(&context, heap2, 2));
 
+    memset(&null_srv, 0, sizeof(null_srv));
+    null_srv.Format = DXGI_FORMAT_R32_FLOAT;
+    null_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    null_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    null_srv.Texture2D.MipLevels = 1;
+    for (i = 5; i <= 6; i++)
+    {
+        ID3D12Device_CreateShaderResourceView(context.device, NULL, &null_srv, get_cpu_descriptor_handle(&context, heap1, i));
+        ID3D12Device_CreateShaderResourceView(context.device, NULL, &null_srv, get_cpu_descriptor_handle(&context, heap2, i));
+    }
+
     memset(&samp, 0, sizeof(samp));
     samp.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     samp.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -7778,8 +7788,31 @@ void test_descriptor_heap_rebind_invalidation(void)
             get_gpu_descriptor_handle(&context, sampler1, 1));
         ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(context.list, 2,
             get_gpu_descriptor_handle(&context, heap1, 1));
+        /* A redundant heap bind must preserve the table offsets before their first use. */
+        ID3D12GraphicsCommandList_SetDescriptorHeaps(context.list, 2, heaps);
         ID3D12GraphicsCommandList_SetComputeRootUnorderedAccessView(context.list, 3,
             ID3D12Resource_GetGPUVirtualAddress(output) + 0 * sizeof(float));
+        ID3D12GraphicsCommandList_Dispatch(context.list, 1, 1, 1);
+    }
+
+    /* Check offset retention across redundant and temporary heap changes. */
+    for (i = 0; i < 4; i++)
+    {
+        ID3D12DescriptorHeap *heaps[2] = { sampler1, heap1 };
+        if (i)
+        {
+            heaps[0] = i >= 2 ? sampler2 : sampler1;
+            heaps[1] = i == 1 || i == 3 ? heap2 : heap1;
+            ID3D12GraphicsCommandList_SetDescriptorHeaps(context.list, 2, heaps);
+            heaps[0] = sampler1;
+            heaps[1] = heap1;
+        }
+        ID3D12GraphicsCommandList_SetDescriptorHeaps(context.list, 2, heaps);
+        /* Repush one table to expose changes to the other offsets. */
+        ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(context.list, 2,
+            get_gpu_descriptor_handle(&context, heap1, 1));
+        ID3D12GraphicsCommandList_SetComputeRootUnorderedAccessView(context.list, 3,
+            ID3D12Resource_GetGPUVirtualAddress(output) + (48 + 16 * i) * sizeof(float));
         ID3D12GraphicsCommandList_Dispatch(context.list, 1, 1, 1);
     }
 
@@ -7827,8 +7860,20 @@ void test_descriptor_heap_rebind_invalidation(void)
         }
     }
 
-    /* Assumption, the table offsets are reset to 0.
-     * tex1 is read with the CLAMP sampler. */
+    for (i = 0; i < 4; i++)
+    {
+        for (y = 0; y < 4; y++)
+        {
+            for (x = 0; x < 4; x++)
+            {
+                float value = get_readback_float(&rb, 48 + 16 * i + y * 4 + x, 0);
+                float expected = 15.0f + (float)((x - 1) & 1) + 2.0f * (float)((y - 1) & 1);
+                ok(value == expected, "rebind %u, coord %u, %u: expected %f, got %f\n", i, x, y, expected, value);
+            }
+        }
+    }
+
+    /* Assumption, the table offsets are kept. */
     for (y = 0; y < 4; y++)
     {
         for (x = 0; x < 4; x++)
@@ -7848,7 +7893,7 @@ void test_descriptor_heap_rebind_invalidation(void)
                 sampled_y &= 1;
                 expected = 10.0f + 5.0f + (float)sampled_x + 2.0f * (float)sampled_y;
             }
-            else if (is_nv_windows)
+            else
             {
                 /* The sampler mapping is retained. */
                 sampled_x &= 1;
@@ -7856,12 +7901,6 @@ void test_descriptor_heap_rebind_invalidation(void)
 
                 /* Heap index seems to remain 1, except we now point into a new heap. */
                 expected = 10.0f + 1.0f + (float)sampled_x + 2.0f * (float)sampled_y;
-            }
-            else
-            {
-                sampled_x = max(min(sampled_x, 1), 0);
-                sampled_y = max(min(sampled_y, 1), 0);
-                expected = 10.0f + 9.0f + (float)sampled_x + 2.0f * (float)sampled_y;
             }
 
             ok(value == expected, "coord %u, %u: expected %f, got %f\n", x, y, expected, value);
@@ -7887,7 +7926,7 @@ void test_descriptor_heap_rebind_invalidation(void)
                 sampled_y &= 1;
                 expected = 10.0f + 5.0f + (float)sampled_x + 2.0f * (float)sampled_y;
             }
-            else if (is_nv_windows)
+            else
             {
                 /* The sampler mapping retains index 1, which is CLAMP in second heap. */
                 sampled_x = max(min(sampled_x, 1), 0);
@@ -7895,12 +7934,6 @@ void test_descriptor_heap_rebind_invalidation(void)
 
                 /* Heap index seems to remain 1, except we now point into a new heap. */
                 expected = 10.0f + 1.0f + (float)sampled_x + 2.0f * (float)sampled_y;
-            }
-            else
-            {
-                sampled_x &= 1;
-                sampled_y &= 1;
-                expected = 10.0f + 9.0f + (float)sampled_x + 2.0f * (float)sampled_y;
             }
 
             ok(value == expected, "coord %u, %u: expected %f, got %f\n", x, y, expected, value);
