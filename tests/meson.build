@@ -35,10 +35,16 @@ dgc_test_args = meson.get_compiler('c', native : true).get_supported_arguments([
   '-Wno-unused-parameter', '-Wno-unused-but-set-variable' ])
 
 foreach recorder : [ 'dgc_recording', 'dgc_replay', 'wbi_recording',
-                     'root_descriptor_failures', 'indirect_allocation', 'dgc_predication' ]
+                     'root_descriptor_failures', 'indirect_allocation', 'dgc_predication', 'descriptor_heap_rebind' ]
   recorder_inputs = [ 'test_' + recorder + '.py', '../libs/vkd3d/command.c' ]
+  recorder_args = dgc_test_args
   if recorder == 'root_descriptor_failures'
     recorder_inputs += [ 'test_dgc_recording.py' ]
+  elif recorder == 'descriptor_heap_rebind'
+    recorder_inputs += [ '../libs/vkd3d/device_workarounds.c', '../include/private/config_flags.h',
+                         '../include/private/config_flag_decl.h', '../include/private/vkd3d_string.h' ]
+    recorder_args += meson.get_compiler('c', native : true).get_supported_arguments([
+      '-Wno-missing-field-initializers' ])
   endif
   recorder_source = custom_target(recorder + '-source',
     input : recorder_inputs,
@@ -47,7 +53,7 @@ foreach recorder : [ 'dgc_recording', 'dgc_replay', 'wbi_recording',
   recorder_test = executable(recorder, recorder_source,
     native : true,
     include_directories : vkd3d_external_includes,
-    c_args : dgc_test_args,
+    c_args : recorder_args,
     install : false)
   if recorder == 'dgc_recording'
     foreach recording_case : [ 'capture-success', 'capture-failure', 'capture-eligibility',
