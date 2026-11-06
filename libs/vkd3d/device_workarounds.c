@@ -1036,6 +1036,19 @@ void d3d12_device_caps_override_application(struct d3d12_device *device)
 void vkd3d_physical_device_info_apply_workarounds(struct vkd3d_physical_device_info *info,
         struct d3d12_device *device)
 {
+    /* Keep older NVIDIA drivers opt-in for descriptor heaps. */
+    if (device->vk_info.EXT_descriptor_heap &&
+            info->vulkan_1_2_properties.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY &&
+            info->properties2.properties.driverVersion < VKD3D_DRIVER_VERSION_MAKE_NV(620, 70, 6) &&
+            !VKD3D_CONFIG_FLAG_IS_SET(DESCRIPTOR_HEAP))
+    {
+        INFO("Disabling VK_EXT_descriptor_heap on NVIDIA drivers older than 620.70.06. "
+                "Use VKD3D_CONFIG=descriptor_heap to opt in.\n");
+        device->vk_info.EXT_descriptor_heap = false;
+        vk_remove_struct(&info->features2, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT);
+        memset(&info->descriptor_heap_features, 0, sizeof(info->descriptor_heap_features));
+    }
+
     /* A performance workaround for NV.
      * The 16 byte offset is a lie, as that is only actually required when we
      * use vectorized load-stores. When we emit vectorized load-store ops,
