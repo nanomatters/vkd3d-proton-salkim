@@ -14476,6 +14476,27 @@ static void vkd3d_pipeline_bindings_set_dirty_sets(struct vkd3d_pipeline_binding
     bindings->dirty_flags |= VKD3D_PIPELINE_DIRTY_HOISTED_DESCRIPTORS;
 }
 
+static void d3d12_command_list_clear_descriptor_table_offsets(struct d3d12_command_list *list)
+{
+    struct vkd3d_pipeline_bindings *bindings[] = { &list->graphics_bindings, &list->compute_bindings };
+    unsigned int i;
+
+    if (!VKD3D_CONFIG_FLAG_IS_SET(CLEAR_TABLE_OFFSETS_ON_REBIND))
+        return;
+
+    /* Resonance of Fate relies on cleared offsets after changing heaps. */
+    for (i = 0; i < ARRAY_SIZE(bindings); i++)
+    {
+        memset(bindings[i]->descriptor_tables, 0, sizeof(bindings[i]->descriptor_tables));
+        if (!bindings[i]->root_signature)
+            continue;
+        if (bindings[i]->root_signature->descriptor_table_count)
+            bindings[i]->dirty_flags |= VKD3D_PIPELINE_DIRTY_DESCRIPTOR_TABLE_OFFSETS;
+        if (bindings[i]->root_signature->hoist_info.num_desc)
+            bindings[i]->dirty_flags |= VKD3D_PIPELINE_DIRTY_HOISTED_DESCRIPTORS;
+    }
+}
+
 static void d3d12_command_list_set_descriptor_heaps(struct d3d12_command_list *list,
         unsigned int heap_count, ID3D12DescriptorHeap *const *heaps)
 {
@@ -14531,26 +14552,7 @@ static void d3d12_command_list_set_descriptor_heaps(struct d3d12_command_list *l
 
     /* Immediately bind the heap. This allows e.g. metacommands to more aggressively use the heap as intended. */
     d3d12_command_list_update_global_descriptor_heap(list);
-
-    if (VKD3D_CONFIG_FLAG_IS_SET(CLEAR_TABLE_OFFSETS_ON_REBIND))
-    {
-        /* If we're invalidating the heap, descriptor table VAs set in root signatures are no longer valid,
-         * since they will point to a completely different heap.
-         * Resonance of Fate remaster seems to rely on the fact that parameters get reset to 0 or something like that.
-         * Only clear if we're invalidating the heap.
-         * Technically, if we're only partially invalidating the offsets by only changing e.g. resource heap,
-         * this is a theoretical hazard.
-         * https://learn.microsoft.com/en-us/windows/win32/direct3d12/setting-descriptor-heaps says:
-         * "Descriptor table state is undefined at the beginning of a command list and after descriptor heaps are changed on a command list.
-         * Redundantly setting the same descriptor heap does not cause descriptor table settings to be undefined."
-         * It is slightly unclear if the undefined-ness is tracked per type since "heap" is lacking a plural,
-         * but we make that assumption.
-         *
-         * ... aaaaand of course Wow Forever Classic relies on UB here and we have to emulate NV behavior anyway, yippee ...
-         */
-        memset(list->graphics_bindings.descriptor_tables, 0, sizeof(list->graphics_bindings.descriptor_tables));
-        memset(list->compute_bindings.descriptor_tables, 0, sizeof(list->compute_bindings.descriptor_tables));
-    }
+    d3d12_command_list_clear_descriptor_table_offsets(list);
 }
 
 static void d3d12_command_list_set_descriptor_heaps_buffers(struct d3d12_command_list *list,
@@ -14608,12 +14610,7 @@ static void d3d12_command_list_set_descriptor_heaps_buffers(struct d3d12_command
      * We also need to invalidate any push descriptors. */
     d3d12_command_list_invalidate_root_parameters(list, &list->graphics_bindings, true, NULL);
     d3d12_command_list_invalidate_root_parameters(list, &list->compute_bindings, true, NULL);
-
-    if (VKD3D_CONFIG_FLAG_IS_SET(CLEAR_TABLE_OFFSETS_ON_REBIND))
-    {
-        memset(list->graphics_bindings.descriptor_tables, 0, sizeof(list->graphics_bindings.descriptor_tables));
-        memset(list->compute_bindings.descriptor_tables, 0, sizeof(list->compute_bindings.descriptor_tables));
-    }
+    d3d12_command_list_clear_descriptor_table_offsets(list);
 }
 
 static void d3d12_command_list_set_descriptor_heaps_sets(struct d3d12_command_list *list,
@@ -14621,6 +14618,7 @@ static void d3d12_command_list_set_descriptor_heaps_sets(struct d3d12_command_li
 {
     struct vkd3d_bindless_state *bindless_state = &list->device->bindless_state;
     uint64_t dirty_mask = 0;
+    bool heap_changed = false;
     unsigned int i, j;
 
     for (i = 0; i < heap_count; i++)
@@ -14636,6 +14634,8 @@ static void d3d12_command_list_set_descriptor_heaps_sets(struct d3d12_command_li
             if (bindless_state->legacy.set_info[j].heap_type != heap->desc.Type)
                 continue;
 
+            if (list->descriptor_heap.sets.vk_sets[j] != heap->sets[set_index].vk_descriptor_set)
+                heap_changed = true;
             list->descriptor_heap.sets.vk_sets[j] = heap->sets[set_index++].vk_descriptor_set;
             dirty_mask |= 1ull << j;
         }
@@ -14652,11 +14652,8 @@ static void d3d12_command_list_set_descriptor_heaps_sets(struct d3d12_command_li
     vkd3d_pipeline_bindings_set_dirty_sets(&list->graphics_bindings, dirty_mask);
     vkd3d_pipeline_bindings_set_dirty_sets(&list->compute_bindings, dirty_mask);
 
-    if (dirty_mask && VKD3D_CONFIG_FLAG_IS_SET(CLEAR_TABLE_OFFSETS_ON_REBIND))
-    {
-        memset(list->graphics_bindings.descriptor_tables, 0, sizeof(list->graphics_bindings.descriptor_tables));
-        memset(list->compute_bindings.descriptor_tables, 0, sizeof(list->compute_bindings.descriptor_tables));
-    }
+    if (heap_changed)
+        d3d12_command_list_clear_descriptor_table_offsets(list);
 }
 
 static void STDMETHODCALLTYPE d3d12_command_list_SetDescriptorHeaps(d3d12_command_list_iface *iface,
