@@ -143,6 +143,17 @@ foreach allocation_case : [ 'locking', 'candidates' ]
     args : [ allocation_case ], timeout : 10)
 endforeach
 
+shader_stage_arguments = custom_target('shader-stage-compile-arguments',
+  input : [ 'test_shader_stage_linkage.py', 'test_queue_placement.py', '../libs/vkd3d/state.c' ],
+  output : 'shader_stage_compile_arguments.h',
+  command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
+shader_stage_linkage_test = executable('shader-stage-linkage',
+  [ 'shader_stage_linkage.c', shader_stage_arguments ],
+  dependencies : [ vkd3d_shader_dep, dxil_spirv_dep ],
+  include_directories : vkd3d_private_includes,
+  install : false)
+test('shader-stage-linkage', shader_stage_linkage_test, timeout : 30)
+
 vkd3d_test_flags = []
 vkd3d_test_deps = [ lib_d3d12, vkd3d_common_dep ]
 if vkd3d_platform == 'windows'
