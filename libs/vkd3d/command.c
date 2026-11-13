@@ -22903,14 +22903,12 @@ static void d3d12_command_list_process_enhanced_barrier_global(struct d3d12_comm
         list->cmd.observes_indirect_argument_barrier = true;
     }
 
-    if (barrier->SyncBefore == D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW ||
-        barrier->SyncBefore == D3D12_BARRIER_SYNC_ALL)
+    if (barrier->SyncBefore & (D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW | D3D12_BARRIER_SYNC_ALL))
     {
         d3d12_command_list_consume_clear_uav_barrier_batch(list, batch, NULL, NULL);
     }
 
-    if (barrier->SyncAfter == D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW ||
-        barrier->SyncAfter == D3D12_BARRIER_SYNC_ALL)
+    if (barrier->SyncAfter & (D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW | D3D12_BARRIER_SYNC_ALL))
     {
         list->cmd.clear_uav.has_visible_clear_stage = false;
     }
@@ -23104,14 +23102,12 @@ static void d3d12_command_list_process_enhanced_barrier_texture(struct d3d12_com
     if (vk_transition.newLayout == VK_IMAGE_LAYOUT_UNDEFINED)
         vk_transition.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (barrier->SyncBefore == D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW ||
-        barrier->SyncBefore == D3D12_BARRIER_SYNC_ALL)
+    if (barrier->SyncBefore & (D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW | D3D12_BARRIER_SYNC_ALL))
     {
         d3d12_command_list_consume_clear_uav_barrier_batch(list, batch, resource, &vk_transition);
     }
 
-    if (barrier->SyncAfter == D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW ||
-        barrier->SyncAfter == D3D12_BARRIER_SYNC_ALL)
+    if (barrier->SyncAfter & (D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW | D3D12_BARRIER_SYNC_ALL))
     {
         list->cmd.clear_uav.has_visible_clear_stage = false;
     }
