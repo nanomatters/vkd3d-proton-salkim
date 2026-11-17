@@ -4230,6 +4230,19 @@ static HRESULT d3d12_resource_create(struct d3d12_device *device, uint32_t flags
         return E_OUTOFMEMORY;
 
     memset(object, 0, sizeof(*object));
+    object->desc = *desc;
+    if (!object->desc.MipLevels)
+        object->desc.MipLevels = max_miplevel_count(desc);
+
+    /* CPU staging needs to address the entire packed texture through one mapping. */
+    if (sizeof(size_t) < sizeof(VkDeviceSize) && d3d12_resource_is_texture(object) &&
+            heap_properties && is_cpu_accessible_heap(heap_properties) &&
+            vkd3d_compute_resource_layouts_from_desc(device, &object->desc, NULL) > SIZE_MAX)
+    {
+        vkd3d_free(object);
+        return E_OUTOFMEMORY;
+    }
+
     object->ID3D12Resource_iface.lpVtbl = &d3d12_resource_vtbl;
 
     if (FAILED(hr = vkd3d_view_map_init(&object->view_map)))
@@ -4249,9 +4262,6 @@ static HRESULT d3d12_resource_create(struct d3d12_device *device, uint32_t flags
 
     object->refcount = 1;
     object->internal_refcount = 1;
-    object->desc = *desc;
-    if (!object->desc.MipLevels)
-        object->desc.MipLevels = max_miplevel_count(desc);
     object->desc.Alignment = d3d12_resource_determine_alignment(device, desc, num_castable_formats, castable_formats);
     object->device = device;
     object->flags = flags;
