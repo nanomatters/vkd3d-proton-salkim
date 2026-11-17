@@ -34,7 +34,7 @@ dgc_test_args = meson.get_compiler('c', native : true).get_supported_arguments([
   '-UNDEBUG', '-Wno-unused-function', '-Wno-unused-variable',
   '-Wno-unused-parameter', '-Wno-unused-but-set-variable' ])
 
-foreach recorder : [ 'dgc_recording', 'dgc_replay', 'wbi_recording', 'clear_uav_barriers',
+foreach recorder : [ 'dgc_recording', 'dgc_replay', 'wbi_recording', 'clear_uav_barriers', 'upload_barriers',
                      'root_descriptor_failures', 'indirect_allocation', 'dgc_predication', 'descriptor_heap_rebind' ]
   recorder_inputs = [ 'test_' + recorder + '.py', '../libs/vkd3d/command.c' ]
   recorder_args = dgc_test_args
@@ -42,6 +42,8 @@ foreach recorder : [ 'dgc_recording', 'dgc_replay', 'wbi_recording', 'clear_uav_
     recorder_inputs += [ 'test_dgc_recording.py' ]
   elif recorder == 'clear_uav_barriers'
     recorder_inputs += [ '../include/vkd3d_d3d12.idl', '../libs/vkd3d/vkd3d_private.h' ]
+  elif recorder == 'upload_barriers'
+    recorder_inputs += [ '../include/vkd3d_d3d12.idl' ]
   elif recorder == 'descriptor_heap_rebind'
     recorder_inputs += [ '../libs/vkd3d/device_workarounds.c', '../include/private/config_flags.h',
                          '../include/private/config_flag_decl.h', '../include/private/vkd3d_string.h' ]
