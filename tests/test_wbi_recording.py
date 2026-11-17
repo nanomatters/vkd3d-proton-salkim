@@ -324,6 +324,11 @@ static void d3d12_command_list_flush_dgc_batch(struct d3d12_command_list *list)
     list->rendering_info.state_flags = VKD3D_RENDERING_ACTIVE;
 }
 
+static void d3d12_command_list_flush_discard_barriers(struct d3d12_command_list *list)
+{
+    (void)list;
+}
+
 static void d3d12_command_list_begin_transfer(struct d3d12_command_list *list)
 {
     /* Deliberately no deferred WAR hazard: isolate command-recording order

@@ -132,6 +132,7 @@ struct d3d12_command_list_barrier_batch
 #define d3d12_command_list_mark_as_invalid(...) assert(false)
 #define d3d12_command_list_check_resource_barrier_trivial_copy_resource(...) false
 #define d3d12_command_list_flush_dgc_batch(...) ((void)0)
+#define d3d12_command_list_flush_discard_barriers(...) ((void)0)
 #define d3d12_command_list_end_current_render_pass(...) ((void)0)
 #define d3d12_command_list_end_transfer_batch(...) ((void)0)
 #define d3d12_command_list_debug_mark_begin_region(...) ((void)0)
