@@ -1230,7 +1230,7 @@ static HRESULT vkd3d_create_image(struct d3d12_device *device,
     return hresult_from_vk_result(vr);
 }
 
-static size_t vkd3d_compute_resource_layouts_from_desc(struct d3d12_device *device,
+static VkDeviceSize vkd3d_compute_resource_layouts_from_desc(struct d3d12_device *device,
         const D3D12_RESOURCE_DESC1 *desc, struct vkd3d_subresource_layout *layouts);
 
 HRESULT vkd3d_get_image_allocation_info(struct d3d12_device *device,
@@ -4139,7 +4139,7 @@ static HRESULT d3d12_resource_create_vk_resource(struct d3d12_resource *resource
     return S_OK;
 }
 
-static size_t vkd3d_compute_resource_layouts_from_desc(struct d3d12_device *device,
+static VkDeviceSize vkd3d_compute_resource_layouts_from_desc(struct d3d12_device *device,
         const D3D12_RESOURCE_DESC1 *desc, struct vkd3d_subresource_layout *layouts)
 {
     struct vkd3d_format_footprint format_footprint;
@@ -4147,7 +4147,7 @@ static size_t vkd3d_compute_resource_layouts_from_desc(struct d3d12_device *devi
     unsigned int i, subresource_count;
     VkExtent3D block_count;
     uint32_t plane_idx;
-    size_t offset = 0;
+    VkDeviceSize offset = 0;
 
     subresource_count = d3d12_resource_desc_get_sub_resource_count(device, desc);
     format = vkd3d_format_from_d3d12_resource_desc(device, desc, 0);
@@ -4168,18 +4168,18 @@ static size_t vkd3d_compute_resource_layouts_from_desc(struct d3d12_device *devi
             layouts[i].depth_pitch = block_count.height * layouts[i].row_pitch;
         }
 
-        offset += block_count.width * block_count.height * block_count.depth * format_footprint.block_byte_count;
+        offset += (VkDeviceSize)block_count.width * block_count.height * block_count.depth * format_footprint.block_byte_count;
     }
 
     return offset;
 }
 
-static size_t d3d12_resource_init_subresource_layouts(struct d3d12_resource *resource, struct d3d12_device *device)
+static void d3d12_resource_init_subresource_layouts(struct d3d12_resource *resource, struct d3d12_device *device)
 {
     unsigned int subresource_count = d3d12_resource_get_sub_resource_count(resource);
 
     resource->subresource_layouts = vkd3d_calloc(subresource_count, sizeof(*resource->subresource_layouts));
-    return vkd3d_compute_resource_layouts_from_desc(device, &resource->desc, resource->subresource_layouts);
+    vkd3d_compute_resource_layouts_from_desc(device, &resource->desc, resource->subresource_layouts);
 }
 
 static UINT64 d3d12_resource_determine_alignment(struct d3d12_device *device, const D3D12_RESOURCE_DESC1 *desc,
@@ -4298,7 +4298,7 @@ static HRESULT d3d12_resource_create(struct d3d12_device *device, uint32_t flags
     {
         if (desc->Flags & high_priority_resource_flags)
         {
-            size_t resource_size = d3d12_resource_is_texture(object) ?
+            VkDeviceSize resource_size = d3d12_resource_is_texture(object) ?
                 vkd3d_compute_resource_layouts_from_desc(device, &object->desc, NULL) :
                 object->desc.Width;
             uint32_t adjust = vkd3d_get_priority_adjust(resource_size);
