@@ -2476,3 +2476,91 @@ void test_fence_signal_ordering_raced_signal_shared(void)
 {
     test_fence_signal_order_raced_signal_inner(true);
 }
+
+void test_upload_buffer_read_barriers(void)
+{
+    static const float colors[2][4] = {{1.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}};
+    struct test_context_desc desc;
+    struct test_context context;
+    struct resource_readback rb;
+    ID3D12Resource *upload, *buffer;
+    unsigned char data[16 * D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT] = {0};
+    D3D12_RECT scissor;
+    unsigned int mode, i;
+    uint32_t expected, actual;
+
+#include "shaders/render_target/headers/ps_color.h"
+
+    memset(&desc, 0, sizeof(desc));
+    desc.no_root_signature = true;
+    desc.no_pipeline = true;
+    desc.rt_width = 16;
+    desc.rt_height = 1;
+    if (!init_test_context(&context, &desc))
+        return;
+
+    context.root_signature = create_cb_root_signature(context.device, 0,
+            D3D12_SHADER_VISIBILITY_PIXEL, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+    context.pipeline_state = create_pipeline_state(context.device, context.root_signature,
+            context.render_target_desc.Format, NULL, &ps_color_dxbc, NULL);
+
+    for (i = 0; i < 16; i++)
+        memcpy(&data[i * D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT], colors[i & 1], sizeof(colors[0]));
+    upload = create_upload_buffer(context.device, sizeof(data), data);
+
+    for (mode = 0; mode < 2; mode++)
+    {
+        vkd3d_test_set_context("Heap %s", mode ? "DEFAULT" : "UPLOAD");
+        if (mode)
+        {
+            reset_command_list(context.list, context.allocator);
+            transition_resource_state(context.list, context.render_target,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            buffer = create_default_buffer(context.device, sizeof(data),
+                    D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
+            ID3D12GraphicsCommandList_CopyBufferRegion(context.list, buffer, 0, upload, 0, sizeof(data));
+            transition_resource_state(context.list, buffer,
+                    D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+        }
+        else
+            buffer = upload;
+
+        ID3D12GraphicsCommandList_OMSetRenderTargets(context.list, 1, &context.rtv, false, NULL);
+        ID3D12GraphicsCommandList_SetGraphicsRootSignature(context.list, context.root_signature);
+        ID3D12GraphicsCommandList_SetPipelineState(context.list, context.pipeline_state);
+        ID3D12GraphicsCommandList_IASetPrimitiveTopology(context.list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ID3D12GraphicsCommandList_RSSetViewports(context.list, 1, &context.viewport);
+
+        /* Check rendering across repeated read-state transitions on both heaps.
+         * The DEFAULT buffer's copy is synchronized before the loop. */
+        for (i = 0; i < 16; i++)
+        {
+            transition_resource_state(context.list, buffer,
+                    D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+            scissor = (D3D12_RECT){i, 0, i + 1, 1};
+            ID3D12GraphicsCommandList_RSSetScissorRects(context.list, 1, &scissor);
+            ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(context.list, 0,
+                    ID3D12Resource_GetGPUVirtualAddress(buffer) + i * D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+            ID3D12GraphicsCommandList_DrawInstanced(context.list, 3, 1, 0, 0);
+            transition_resource_state(context.list, buffer,
+                    D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, D3D12_RESOURCE_STATE_GENERIC_READ);
+        }
+
+        transition_resource_state(context.list, context.render_target,
+                D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        get_texture_readback_with_command_list(context.render_target, 0, &rb, context.queue, context.list);
+        for (i = 0; i < 16; i++)
+        {
+            expected = i & 1 ? 0xff00ff00 : 0xff0000ff;
+            actual = get_readback_uint(&rb, i, 0, 0);
+            ok(actual == expected, "Pixel %u is %#x, expected %#x.\n", i, actual, expected);
+        }
+        release_resource_readback(&rb);
+        if (mode)
+            ID3D12Resource_Release(buffer);
+    }
+
+    vkd3d_test_set_context(NULL);
+    ID3D12Resource_Release(upload);
+    destroy_test_context(&context);
+}

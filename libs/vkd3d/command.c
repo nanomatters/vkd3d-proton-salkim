@@ -14066,6 +14066,56 @@ static const char *vkd3d_barrier_access_to_str(D3D12_BARRIER_ACCESS access)
     return buffer;
 }
 
+static bool d3d12_command_list_check_resource_barrier_read_only_upload(
+        struct d3d12_command_list *list, UINT barrier_count, const D3D12_RESOURCE_BARRIER *barriers)
+{
+    const D3D12_RESOURCE_TRANSITION_BARRIER *transition;
+    struct d3d12_resource *resource;
+    unsigned int i;
+
+    if (!barrier_count || list->type == D3D12_COMMAND_LIST_TYPE_COPY)
+        return false;
+
+    /* UPLOAD buffers cannot be written by the GPU. Their host writes are made
+     * visible by queue submission, so changing between read states needs no GPU
+     * barrier. GPU_UPLOAD and other heaps can be GPU-written and must retain
+     * read-to-read dependencies which carry visibility from an earlier write. */
+    for (i = 0; i < barrier_count; i++)
+    {
+        if (barriers[i].Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION ||
+                barriers[i].Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE)
+            return false;
+
+        transition = &barriers[i].Transition;
+        if (!transition->StateBefore || !transition->StateAfter ||
+                ((transition->StateBefore | transition->StateAfter) & ~D3D12_RESOURCE_STATE_GENERIC_READ))
+            return false;
+        if (transition->Subresource != 0 && transition->Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES)
+            return false;
+        if (!(resource = impl_from_ID3D12Resource(transition->pResource)) ||
+                !d3d12_resource_is_buffer(resource) || resource->heap_properties.Type != D3D12_HEAP_TYPE_UPLOAD)
+            return false;
+    }
+
+    /* Validate the whole batch before changing any command-list bookkeeping.
+     * Keep indirect preprocessing and initial resource tracking consistent with
+     * the regular path, without interrupting an active render pass. */
+    for (i = 0; i < barrier_count; i++)
+    {
+        transition = &barriers[i].Transition;
+        resource = impl_from_ID3D12Resource(transition->pResource);
+        if (transition->StateAfter & D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT)
+        {
+            list->cmd.vk_post_indirect_barrier_commands = list->cmd.vk_command_buffer;
+            list->cmd.observes_indirect_argument_barrier = true;
+        }
+        d3d12_command_list_track_resource_usage(list, resource, true);
+    }
+
+    TRACE("Ignoring %u read-only upload buffer transitions.\n", barrier_count);
+    return true;
+}
+
 static bool d3d12_command_list_check_resource_barrier_trivial_copy_resource(
     struct d3d12_command_list *list, UINT barrier_count, const D3D12_RESOURCE_BARRIER *barriers)
 {
@@ -14132,6 +14182,9 @@ static void STDMETHODCALLTYPE d3d12_command_list_ResourceBarrier(d3d12_command_l
     unsigned int i, j;
 
     TRACE("iface %p, barrier_count %u, barriers %p.\n", iface, barrier_count, barriers);
+
+    if (d3d12_command_list_check_resource_barrier_read_only_upload(list, barrier_count, barriers))
+        return;
 
     /* Ignore enhanced barriers. They are much harder to reason about due to the transient nature of Vulkan-style
      * barriers. This is more or less just a workaround too for terribly written games,
