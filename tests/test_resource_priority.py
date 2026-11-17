@@ -147,6 +147,17 @@ int main(void)
     desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
     desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     test_format.byte_count = 16;
+    if (sizeof(size_t) < sizeof(VkDeviceSize))
+    {
+        for (unsigned int i = 0; i < 2; i++)
+        {
+            result = NULL;
+            hr = d3d12_resource_create(&device, i ? VKD3D_RESOURCE_PLACED : VKD3D_RESOURCE_COMMITTED,
+                    &desc, &properties, D3D12_HEAP_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON,
+                    NULL, 0, NULL, &result);
+            assert(hr == E_OUTOFMEMORY && !result);
+        }
+    }
     for (unsigned int i = 0; i < 2; i++)
     {
         if (i)
