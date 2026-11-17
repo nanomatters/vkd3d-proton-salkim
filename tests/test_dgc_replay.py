@@ -128,6 +128,7 @@ static void d3d12_command_list_SetPipelineState(int *iface, int *pipeline)
     list->dynamic_state.strip_cut = 0;
 }
 
+static void d3d12_command_list_flush_discard_barriers(struct d3d12_command_list *list) {}
 static void d3d12_command_list_invalidate_all_state(struct d3d12_command_list *list) {}
 static void d3d12_command_list_promote_dsv_layout(struct d3d12_command_list *list) {}
 static void d3d12_command_list_end_current_render_pass(struct d3d12_command_list *list, bool suspend) {}

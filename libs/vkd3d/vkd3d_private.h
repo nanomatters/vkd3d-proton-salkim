@@ -3412,6 +3412,16 @@ struct vkd3d_deferred_discard
     VkImageSubresourceRange subresources;
 };
 
+/* Transitions retained across DiscardResource calls until the next GPU work. */
+struct vkd3d_discard_barrier_batch
+{
+    VkImageMemoryBarrier2 barriers[16];
+    struct d3d12_resource *resources[16];
+    unsigned int count;
+    /* Raw command buffer handles may be cached across resets. */
+    bool external_commands;
+};
+
 struct vkd3d_query_ranges
 {
     struct vkd3d_query_range *ranges;
@@ -3484,6 +3494,7 @@ struct d3d12_command_list
     unsigned int deferred_clear_count;
     struct vkd3d_deferred_discard deferred_discards[VKD3D_MAX_DEFERRED_CLEAR_COUNT];
     unsigned int deferred_discard_count;
+    struct vkd3d_discard_barrier_batch discard_barriers;
 
     struct d3d12_rtv_resolve *rtv_resolves;
     size_t rtv_resolve_size;
@@ -3627,6 +3638,7 @@ void d3d12_command_list_invalidate_root_parameters(struct d3d12_command_list *li
 void d3d12_command_list_invalidate_descriptor_heap(struct d3d12_command_list *list);
 void d3d12_command_list_update_global_descriptor_heap(struct d3d12_command_list *list);
 void d3d12_command_list_flush_dgc_batch(struct d3d12_command_list *list);
+void d3d12_command_list_flush_discard_barriers(struct d3d12_command_list *list);
 void d3d12_command_list_meta_push_data(struct d3d12_command_list *list,
         VkCommandBuffer vk_command_buffer,
         VkPipelineLayout vk_pipeline_layout, VkShaderStageFlags stages,
