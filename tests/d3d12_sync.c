@@ -2480,6 +2480,7 @@ void test_fence_signal_ordering_raced_signal_shared(void)
 void test_upload_buffer_read_barriers(void)
 {
     static const float colors[2][4] = {{1.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}};
+    D3D12_RESOURCE_BARRIER barriers[2] = {{0}};
     struct test_context_desc desc;
     struct test_context context;
     struct resource_readback rb;
@@ -2508,9 +2509,9 @@ void test_upload_buffer_read_barriers(void)
         memcpy(&data[i * D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT], colors[i & 1], sizeof(colors[0]));
     upload = create_upload_buffer(context.device, sizeof(data), data);
 
-    for (mode = 0; mode < 2; mode++)
+    for (mode = 0; mode < 3; mode++)
     {
-        vkd3d_test_set_context("Heap %s", mode ? "DEFAULT" : "UPLOAD");
+        vkd3d_test_set_context("Heap %s", mode == 2 ? "mixed UPLOAD/DEFAULT" : mode ? "DEFAULT" : "UPLOAD");
         if (mode)
         {
             reset_command_list(context.list, context.allocator);
@@ -2518,9 +2519,12 @@ void test_upload_buffer_read_barriers(void)
                     D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
             buffer = create_default_buffer(context.device, sizeof(data),
                     D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
-            ID3D12GraphicsCommandList_CopyBufferRegion(context.list, buffer, 0, upload, 0, sizeof(data));
-            transition_resource_state(context.list, buffer,
-                    D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+            if (mode == 1)
+            {
+                ID3D12GraphicsCommandList_CopyBufferRegion(context.list, buffer, 0, upload, 0, sizeof(data));
+                transition_resource_state(context.list, buffer,
+                        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+            }
         }
         else
             buffer = upload;
@@ -2531,19 +2535,45 @@ void test_upload_buffer_read_barriers(void)
         ID3D12GraphicsCommandList_IASetPrimitiveTopology(context.list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ID3D12GraphicsCommandList_RSSetViewports(context.list, 1, &context.viewport);
 
-        /* Check rendering across repeated read-state transitions on both heaps.
-         * The DEFAULT buffer's copy is synchronized before the loop. */
+        /* The first two modes check rendering across repeated read transitions.
+         * The mixed mode copies fresh data each draw, so the DEFAULT transition
+         * must still synchronize the copy when the UPLOAD transition is skipped. */
         for (i = 0; i < 16; i++)
         {
-            transition_resource_state(context.list, buffer,
-                    D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+            if (mode == 2)
+            {
+                unsigned int offset = i * D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
+
+                ID3D12GraphicsCommandList_CopyBufferRegion(context.list, buffer, offset,
+                        upload, offset, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+                /* Exercise the UPLOAD transition both before and after the real barrier. */
+                barriers[i & 1].Transition = (D3D12_RESOURCE_TRANSITION_BARRIER){upload,
+                        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_GENERIC_READ,
+                        D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER};
+                barriers[(i & 1) ^ 1].Transition = (D3D12_RESOURCE_TRANSITION_BARRIER){buffer,
+                        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COPY_DEST,
+                        D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER};
+                ID3D12GraphicsCommandList_ResourceBarrier(context.list, 2, barriers);
+            }
+            else
+                transition_resource_state(context.list, buffer,
+                        D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
             scissor = (D3D12_RECT){i, 0, i + 1, 1};
             ID3D12GraphicsCommandList_RSSetScissorRects(context.list, 1, &scissor);
             ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(context.list, 0,
                     ID3D12Resource_GetGPUVirtualAddress(buffer) + i * D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
             ID3D12GraphicsCommandList_DrawInstanced(context.list, 3, 1, 0, 0);
-            transition_resource_state(context.list, buffer,
-                    D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, D3D12_RESOURCE_STATE_GENERIC_READ);
+            if (mode == 2)
+            {
+                barriers[i & 1].Transition.StateBefore = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+                barriers[i & 1].Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
+                barriers[(i & 1) ^ 1].Transition.StateBefore = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+                barriers[(i & 1) ^ 1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+                ID3D12GraphicsCommandList_ResourceBarrier(context.list, 2, barriers);
+            }
+            else
+                transition_resource_state(context.list, buffer,
+                        D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, D3D12_RESOURCE_STATE_GENERIC_READ);
         }
 
         transition_resource_state(context.list, context.render_target,

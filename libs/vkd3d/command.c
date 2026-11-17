@@ -14056,6 +14056,32 @@ static const char *vkd3d_barrier_access_to_str(D3D12_BARRIER_ACCESS access)
     return buffer;
 }
 
+static bool d3d12_resource_barrier_is_read_only_upload(const struct d3d12_command_list *list,
+        const D3D12_RESOURCE_BARRIER *barrier)
+{
+    const D3D12_RESOURCE_TRANSITION_BARRIER *transition;
+    struct d3d12_resource *resource;
+
+    if (list->type == D3D12_COMMAND_LIST_TYPE_COPY ||
+            barrier->Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION ||
+            barrier->Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE)
+        return false;
+
+    /* UPLOAD buffers cannot be written by the GPU. Their host writes are made
+     * visible by queue submission, so changing between read states needs no GPU
+     * barrier. GPU_UPLOAD and other heaps can be GPU-written and must retain
+     * read-to-read dependencies which carry visibility from an earlier write. */
+    transition = &barrier->Transition;
+    if (!transition->StateBefore || !transition->StateAfter ||
+            ((transition->StateBefore | transition->StateAfter) & ~D3D12_RESOURCE_STATE_GENERIC_READ))
+        return false;
+    if (transition->Subresource != 0 && transition->Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES)
+        return false;
+
+    resource = impl_from_ID3D12Resource(transition->pResource);
+    return resource && d3d12_resource_is_buffer(resource) && resource->heap_properties.Type == D3D12_HEAP_TYPE_UPLOAD;
+}
+
 static bool d3d12_command_list_check_resource_barrier_read_only_upload(
         struct d3d12_command_list *list, UINT barrier_count, const D3D12_RESOURCE_BARRIER *barriers)
 {
@@ -14063,27 +14089,12 @@ static bool d3d12_command_list_check_resource_barrier_read_only_upload(
     struct d3d12_resource *resource;
     unsigned int i;
 
-    if (!barrier_count || list->type == D3D12_COMMAND_LIST_TYPE_COPY)
+    if (!barrier_count)
         return false;
 
-    /* UPLOAD buffers cannot be written by the GPU. Their host writes are made
-     * visible by queue submission, so changing between read states needs no GPU
-     * barrier. GPU_UPLOAD and other heaps can be GPU-written and must retain
-     * read-to-read dependencies which carry visibility from an earlier write. */
     for (i = 0; i < barrier_count; i++)
     {
-        if (barriers[i].Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION ||
-                barriers[i].Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE)
-            return false;
-
-        transition = &barriers[i].Transition;
-        if (!transition->StateBefore || !transition->StateAfter ||
-                ((transition->StateBefore | transition->StateAfter) & ~D3D12_RESOURCE_STATE_GENERIC_READ))
-            return false;
-        if (transition->Subresource != 0 && transition->Subresource != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES)
-            return false;
-        if (!(resource = impl_from_ID3D12Resource(transition->pResource)) ||
-                !d3d12_resource_is_buffer(resource) || resource->heap_properties.Type != D3D12_HEAP_TYPE_UPLOAD)
+        if (!d3d12_resource_barrier_is_read_only_upload(list, &barriers[i]))
             return false;
     }
 
@@ -14273,6 +14284,11 @@ static void STDMETHODCALLTYPE d3d12_command_list_ResourceBarrier(d3d12_command_l
                 VKD3D_BREADCRUMB_AUX32(transition->StateBefore);
                 VKD3D_BREADCRUMB_AUX32(transition->StateAfter);
                 VKD3D_BREADCRUMB_TAG("Resource Transition");
+
+                /* Mixed batches still need their other barriers, but an UPLOAD
+                 * read transition must not widen their synchronization scopes. */
+                if (d3d12_resource_barrier_is_read_only_upload(list, current))
+                    break;
 
                 /* Flush pending RTAS updates in case a scratch buffer or input resource gets transitioned */
                 if (d3d12_resource_is_buffer(preserve_resource) && (transition->StateBefore == D3D12_RESOURCE_STATE_UNORDERED_ACCESS ||
