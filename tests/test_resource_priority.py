@@ -14,12 +14,14 @@ import tempfile
 PREAMBLE = r'''
 #define VKD3D_DBG_CHANNEL VKD3D_DBG_CHANNEL_API
 #include "vkd3d_private.h"
+#include <math.h>
 #include <stdio.h>
 
 static struct d3d12_resource texture;
 const struct ID3D12Resource2Vtbl d3d12_resource_vtbl;
 static struct vkd3d_format test_format = { .vk_aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT };
 static unsigned int allocations;
+static VkDeviceSize expected_size = 4 * 1024 * 1024;
 static float expected_priority;
 
 static HRESULT check_allocation(const struct vkd3d_allocate_memory_info *info,
@@ -28,8 +30,8 @@ static HRESULT check_allocation(const struct vkd3d_allocate_memory_info *info,
     assert(allocations < 2);
     assert(allocation == (allocations ? &texture.mem : &texture.private_mem));
     assert(info->heap_properties.Type == (allocations ? D3D12_HEAP_TYPE_GPU_UPLOAD : D3D12_HEAP_TYPE_DEFAULT));
-    assert(info->memory_requirements.size == 4 * 1024 * 1024);
-    if (info->vk_memory_priority != expected_priority)
+    assert(info->memory_requirements.size == expected_size);
+    if (fabsf(info->vk_memory_priority - expected_priority) > 1e-7f)
     {
         fprintf(stderr, "%s priority %f, expected %f\n", allocations ? "staging" : "image",
                 info->vk_memory_priority, expected_priority);
@@ -41,7 +43,7 @@ static HRESULT check_allocation(const struct vkd3d_allocate_memory_info *info,
 
 #undef VK_CALL
 #define VK_CALL(f) f
-#define vkGetImageMemoryRequirements2(dev, image, req) ((req)->memoryRequirements = (VkMemoryRequirements){4 * 1024 * 1024, 65536, 1})
+#define vkGetImageMemoryRequirements2(dev, image, req) ((req)->memoryRequirements = (VkMemoryRequirements){expected_size, 65536, 1})
 #define vkBindImageMemory2(...) VK_SUCCESS
 #undef VKD3D_CONFIG_FLAG_IS_SET
 #define VKD3D_CONFIG_FLAG_IS_SET(x) false
@@ -74,7 +76,9 @@ static HRESULT check_allocation(const struct vkd3d_allocate_memory_info *info,
 #define d3d12_resource_desc_get_sub_resource_count(dev, desc) d3d12_resource_desc_get_sub_resource_count_per_plane(desc)
 #define vkd3d_format_footprint_for_plane(fmt, plane) ((struct vkd3d_format_footprint){ \
         .block_width = 1, .block_height = 1, .block_byte_count = test_format.byte_count })
-#define d3d12_resource_desc_get_subresource_extent(desc, fmt, index) ((VkExtent3D){(desc)->Width, (desc)->Height, 1})
+#define d3d12_resource_desc_get_subresource_extent(desc, fmt, index) \
+        d3d12_resource_desc_get_vk_subresource_extent(desc, NULL, \
+                &(VkImageSubresourceLayers){.mipLevel = (index) % (desc)->MipLevels})
 #define d3d12_resource_tag_debug_name(...) ((void)0)
 #define vkd3d_allocate_heap_memory(...) E_FAIL
 #define vkd3d_queue_timeline_trace_register_instantaneous(...) ((void)0)
@@ -119,8 +123,25 @@ int main(void)
         assert(hr == S_OK && result == &texture && allocations == 2);
     }
     puts("Committed texture image and staging allocation priorities passed.");
-    /* A 16k RGBA32F subresource is 4 GiB. Two layers also exercise accumulation. */
+    /* Both forms describe the same 2048x2048 RGBA8 texture down to its 1x1 mip. */
     device.device_info.pageable_device_memory_features.pageableDeviceLocalMemory = VK_FALSE;
+    desc.Width = desc.Height = 2048;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    expected_size = 22369620;
+    expected_priority = vkd3d_convert_to_vk_prio(D3D12_RESIDENCY_PRIORITY_HIGH | 2);
+    for (unsigned int i = 0; i < 2; i++)
+    {
+        desc.MipLevels = i ? 0 : 12;
+        allocations = 0;
+        hr = d3d12_resource_create_committed(&device, &desc, &properties,
+                D3D12_HEAP_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON, NULL, 0, NULL, NULL, &result);
+        assert(hr == S_OK && result->desc.MipLevels == 12 && allocations == 2);
+        assert(result->priority.d3d12priority == (D3D12_RESIDENCY_PRIORITY_HIGH | 2));
+    }
+    puts("Explicit and implicit full mip chain priorities and staging sizes passed.");
+
+    /* A 16k RGBA32F subresource is 4 GiB. Two layers also exercise accumulation. */
+    desc.MipLevels = 1;
     desc.Width = desc.Height = 16384;
     desc.DepthOrArraySize = 2;
     desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -176,7 +197,7 @@ def main():
 
     utils, resource = source("utils"), source("resource")
     functions = [function(utils, "vkd3d_get_priority_adjust"), function(utils, "vkd3d_lerp_u32_to_float"), function(utils, "vkd3d_convert_to_vk_prio"),
-                 function(resource, "vkd3d_compute_resource_layouts_from_desc"),
+                 function(resource, "max_miplevel_count"), function(resource, "vkd3d_compute_resource_layouts_from_desc"),
                  function(resource, "d3d12_resource_create"), function(resource, "d3d12_resource_create_committed")]
     with tempfile.TemporaryDirectory() as tmp:
         harness, binary = Path(tmp) / "priority.c", Path(tmp) / "priority"

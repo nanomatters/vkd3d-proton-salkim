@@ -4120,9 +4120,6 @@ static HRESULT d3d12_resource_create_vk_resource(struct d3d12_resource *resource
     {
         resource->initial_layout_transition = 1;
 
-        if (!resource->desc.MipLevels)
-            resource->desc.MipLevels = max_miplevel_count(&resource->desc);
-
         if (FAILED(hr = vkd3d_create_image(device, heap_properties,
                 &resource->desc, resource,
                 num_castable_formats, castable_formats,
@@ -4253,6 +4250,8 @@ static HRESULT d3d12_resource_create(struct d3d12_device *device, uint32_t flags
     object->refcount = 1;
     object->internal_refcount = 1;
     object->desc = *desc;
+    if (!object->desc.MipLevels)
+        object->desc.MipLevels = max_miplevel_count(desc);
     object->desc.Alignment = d3d12_resource_determine_alignment(device, desc, num_castable_formats, castable_formats);
     object->device = device;
     object->flags = flags;
@@ -4362,8 +4361,6 @@ HRESULT d3d12_resource_create_borrowed(struct d3d12_device *device, const D3D12_
         return hr;
 
     object->res.vk_image = (VkImage)vk_handle;
-    if (!object->desc.MipLevels)
-        object->desc.MipLevels = max_miplevel_count(desc);
 
     if (d3d12_device_supports_unified_layouts(device))
     {
@@ -4557,7 +4554,7 @@ HRESULT d3d12_resource_create_committed(struct d3d12_device *device, const D3D12
         if (object->flags & VKD3D_RESOURCE_LINEAR_STAGING_COPY)
         {
             memset(&allocate_info, 0, sizeof(allocate_info));
-            allocate_info.memory_requirements.size = vkd3d_compute_resource_layouts_from_desc(device, desc, NULL);
+            allocate_info.memory_requirements.size = vkd3d_compute_resource_layouts_from_desc(device, &object->desc, NULL);
             allocate_info.memory_requirements.alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
             allocate_info.memory_requirements.memoryTypeBits = ~0u;
             allocate_info.heap_properties = *heap_properties;
@@ -4757,7 +4754,7 @@ HRESULT d3d12_resource_create_placed(struct d3d12_device *device, const D3D12_RE
         if (object->flags & VKD3D_RESOURCE_LINEAR_STAGING_COPY)
         {
             /* Packed linear size should never be greater than the image size */
-            assert(vkd3d_compute_resource_layouts_from_desc(device, desc, NULL) <= memory_requirements.size);
+            assert(vkd3d_compute_resource_layouts_from_desc(device, &object->desc, NULL) <= memory_requirements.size);
 
             /* Allocate video memory for the actual image resource */
             memset(&allocate_info, 0, sizeof(allocate_info));
