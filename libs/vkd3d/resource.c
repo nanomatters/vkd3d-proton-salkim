@@ -4387,6 +4387,7 @@ HRESULT d3d12_resource_create_committed(struct d3d12_device *device, const D3D12
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     struct d3d12_resource *object;
+    float vk_memory_priority;
     HRESULT hr;
 
     if (FAILED(hr = d3d12_resource_create(device, VKD3D_RESOURCE_COMMITTED | VKD3D_RESOURCE_ALLOCATION,
@@ -4394,6 +4395,9 @@ HRESULT d3d12_resource_create_committed(struct d3d12_device *device, const D3D12
             num_castable_formats, castable_formats,
             &object)))
         return hr;
+
+    vk_memory_priority = object->priority.residency_count ?
+            vkd3d_convert_to_vk_prio(object->priority.d3d12priority) : 0.0f;
 
     if (d3d12_resource_is_texture(object))
     {
@@ -4462,7 +4466,7 @@ HRESULT d3d12_resource_create_committed(struct d3d12_device *device, const D3D12
         else
             allocate_info.heap_flags |= D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
 
-        allocate_info.vk_memory_priority = object->priority.residency_count ? vkd3d_convert_to_vk_prio(object->priority.d3d12priority) : 0.f;
+        allocate_info.vk_memory_priority = vk_memory_priority;
 
         if (heap_flags & D3D12_HEAP_FLAG_SHARED)
         {
@@ -4559,6 +4563,7 @@ HRESULT d3d12_resource_create_committed(struct d3d12_device *device, const D3D12
             allocate_info.heap_properties = *heap_properties;
             allocate_info.heap_flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
             allocate_info.flags = VKD3D_ALLOCATION_FLAG_GLOBAL_BUFFER;
+            allocate_info.vk_memory_priority = vk_memory_priority;
 
             if (FAILED(hr = vkd3d_allocate_memory(device, &device->memory_allocator, &allocate_info, &object->mem)))
                 goto fail;
@@ -4580,7 +4585,7 @@ HRESULT d3d12_resource_create_committed(struct d3d12_device *device, const D3D12
         allocate_info.heap_desc.Alignment = object->desc.Alignment;
         allocate_info.heap_desc.SizeInBytes = align(desc->Width, allocate_info.heap_desc.Alignment);
         allocate_info.heap_desc.Flags = heap_flags | D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
-        allocate_info.vk_memory_priority = object->priority.residency_count ? vkd3d_convert_to_vk_prio(object->priority.d3d12priority) : 0.f;
+        allocate_info.vk_memory_priority = vk_memory_priority;
 
         if (!VKD3D_CONFIG_FLAG_IS_SET(DAMAGE_NOT_ZEROED_ALLOCATIONS))
         {
