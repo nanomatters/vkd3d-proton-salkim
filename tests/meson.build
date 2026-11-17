@@ -43,8 +43,7 @@ foreach recorder : [ 'dgc_recording', 'dgc_replay', 'wbi_recording', 'clear_uav_
   elif recorder == 'clear_uav_barriers'
     recorder_inputs += [ '../include/vkd3d_d3d12.idl', '../libs/vkd3d/vkd3d_private.h' ]
   elif recorder == 'discard_barriers'
-    recorder_inputs += [ '../libs/vkd3d/vkd3d_private.h', '../libs/vkd3d/command_list_vkd3d_ext.c',
-                         '../libs/vkd3d/device_vkd3d_ext.c' ]
+    recorder_inputs += [ '../libs/vkd3d/vkd3d_private.h' ]
   elif recorder == 'upload_barriers'
     recorder_inputs += [ '../include/vkd3d_d3d12.idl' ]
   elif recorder == 'descriptor_heap_rebind'

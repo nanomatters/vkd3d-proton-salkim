@@ -95,8 +95,6 @@ static void d3d12_command_list_flush_rtas_barrier(struct d3d12_command_list *lis
 static void d3d12_command_list_clear_rtas_batch(struct d3d12_command_list *list);
 
 static void d3d12_command_list_flush_query_resolves(struct d3d12_command_list *list);
-static void d3d12_command_list_queue_discard_barrier(struct d3d12_command_list *list,
-        struct d3d12_resource *resource, const VkImageMemoryBarrier2 *barrier);
 
 static void d3d12_command_allocator_ensure_compute_fallback(struct d3d12_command_allocator *allocator);
 
@@ -2292,8 +2290,6 @@ static void d3d12_command_list_begin_new_sequence(struct d3d12_command_list *lis
     struct d3d12_command_list_iteration *iteration;
     VkCommandBufferBeginInfo begin_info;
     VkResult vr;
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     if (list->cmd.iteration_count >= VKD3D_MAX_COMMAND_LIST_SEQUENCES)
     {
@@ -4649,29 +4645,9 @@ VkPipelineStageFlags2 vk_queue_shader_stages(struct d3d12_device *device, VkQueu
 static void d3d12_command_list_discard_attachment(struct d3d12_command_list *list,
         struct d3d12_resource *resource, const VkImageSubresourceRange *subresources);
 
-/* Pending discards may cross CPU state changes, but must precede the next GPU
- * operation or command-buffer boundary. Keep the complete transition captured
- * at discard time, including the depth/stencil layout. */
-void d3d12_command_list_flush_discard_barriers(struct d3d12_command_list *list)
-{
-    const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
-    struct vkd3d_discard_barrier_batch *batch = &list->discard_barriers;
-    VkDependencyInfo dep_info;
-
-    if (!batch->count)
-        return;
-
-    memset(&dep_info, 0, sizeof(dep_info));
-    dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    dep_info.imageMemoryBarrierCount = batch->count;
-    dep_info.pImageMemoryBarriers = batch->barriers;
-    batch->count = 0;
-    VK_CALL(vkCmdPipelineBarrier2(list->cmd.vk_command_buffer, &dep_info));
-}
-
 static void d3d12_command_list_discard_attachment_barrier(struct d3d12_command_list *list,
         struct d3d12_resource *resource, const VkImageSubresourceRange *subresources, bool is_bound,
-        bool defer)
+        struct d3d12_command_list_barrier_batch *batch)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
     VkImageMemoryBarrier2 barrier;
@@ -4679,6 +4655,15 @@ static void d3d12_command_list_discard_attachment_barrier(struct d3d12_command_l
     VkDependencyInfo dep_info;
     VkAccessFlags2 access;
     VkImageLayout layout;
+
+    /* Sparse subresources can alias the same physical memory. */
+    if (resource->flags & VKD3D_RESOURCE_RESERVED)
+        batch = NULL;
+
+    /* Discarding an attachment may execute a deferred clear. Keep earlier
+     * transitions ahead of that work, even when its subresource is different. */
+    if (batch && list->deferred_clear_count)
+        d3d12_command_list_barrier_batch_end(list, batch);
 
     /* Ignore read access bits since reads will be undefined anyway */
     if ((list->type == D3D12_COMMAND_LIST_TYPE_DIRECT) &&
@@ -4727,13 +4712,14 @@ static void d3d12_command_list_discard_attachment_barrier(struct d3d12_command_l
     barrier.image = resource->res.vk_image;
     barrier.subresourceRange = *subresources;
 
-    if (defer)
+    if (batch)
     {
-        d3d12_command_list_queue_discard_barrier(list, resource, &barrier);
+        d3d12_command_list_barrier_batch_add_layout_transition(list, batch, &barrier);
+        if (VKD3D_CONFIG_FLAG_IS_SET(BREADCRUMBS))
+            d3d12_command_list_barrier_batch_end(list, batch);
         return;
     }
 
-    d3d12_command_list_flush_discard_barriers(list);
     memset(&dep_info, 0, sizeof(dep_info));
     dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dep_info.imageMemoryBarrierCount = 1;
@@ -4983,8 +4969,6 @@ static void d3d12_command_list_emit_render_pass_transition(struct d3d12_command_
     struct d3d12_rtv_desc *dsv;
     VkDependencyInfo dep_info;
     uint32_t i;
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     memset(&dep_info, 0, sizeof(dep_info));
     dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
@@ -5813,49 +5797,8 @@ static void d3d12_command_list_fuse_attachment_clear(struct d3d12_command_list *
 static void d3d12_command_list_execute_deferred_clear(struct d3d12_command_list *list,
     const struct vkd3d_deferred_clear *clear)
 {
-    d3d12_command_list_flush_discard_barriers(list);
     d3d12_command_list_load_attachment(list, clear->resource, clear->view,
             clear->clear_aspects, &clear->clear_value, 0u, NULL, VK_ATTACHMENT_LOAD_OP_CLEAR);
-}
-
-static bool vk_subresource_range_overlaps(uint32_t base_a, uint32_t count_a, uint32_t base_b, uint32_t count_b);
-
-static void d3d12_command_list_queue_discard_barrier(struct d3d12_command_list *list,
-        struct d3d12_resource *resource, const VkImageMemoryBarrier2 *barrier)
-{
-    struct vkd3d_discard_barrier_batch *batch = &list->discard_barriers;
-    const VkImageSubresourceRange *a = &barrier->subresourceRange, *b;
-    bool immediate;
-    unsigned int i;
-
-    /* Sparse and borrowed images have no reliable alias ranges. External
-     * commands are not observed, and breadcrumbs must stay between discards. */
-    immediate = (resource->flags & (VKD3D_RESOURCE_RESERVED | VKD3D_RESOURCE_EXTERNAL)) ||
-            batch->external_commands || VKD3D_CONFIG_FLAG_IS_SET(BREADCRUMBS);
-    if (immediate || batch->count == ARRAY_SIZE(batch->barriers))
-        d3d12_command_list_flush_discard_barriers(list);
-
-    for (i = 0; i < batch->count; i++)
-    {
-        if (resource == batch->resources[i])
-        {
-            b = &batch->barriers[i].subresourceRange;
-            if (!(a->aspectMask & b->aspectMask) ||
-                    !vk_subresource_range_overlaps(a->baseMipLevel, a->levelCount, b->baseMipLevel, b->levelCount) ||
-                    !vk_subresource_range_overlaps(a->baseArrayLayer, a->layerCount, b->baseArrayLayer, b->layerCount))
-                continue;
-        }
-        else if (!vkd3d_check_subresource_overlap(resource, NULL, batch->resources[i], NULL))
-            continue;
-
-        d3d12_command_list_flush_discard_barriers(list);
-        break;
-    }
-
-    batch->resources[batch->count] = resource;
-    batch->barriers[batch->count++] = *barrier;
-    if (immediate)
-        d3d12_command_list_flush_discard_barriers(list);
 }
 
 static bool vkd3d_check_rtv_overlap(const struct d3d12_rtv_desc *rtv,
@@ -6953,8 +6896,6 @@ static HRESULT STDMETHODCALLTYPE d3d12_command_list_Close(d3d12_command_list_ifa
 
     TRACE("iface %p.\n", iface);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     if (!list->is_recording)
     {
         WARN("Command list is not in the recording state.\n");
@@ -7315,7 +7256,6 @@ static void d3d12_command_list_reset_internal_state(struct d3d12_command_list *l
     list->dsv_resource_tracking_count = 0;
     list->deferred_clear_count = 0;
     list->deferred_discard_count = 0;
-    list->discard_barriers.count = 0;
     list->subresource_tracking_count = 0;
     list->transfer_batch.tracked_copy_buffer_count = 0;
     list->transfer_batch.tracked_copy_texture_count = 0;
@@ -9297,8 +9237,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawInstanced(d3d12_command_lis
             iface, vertex_count_per_instance, instance_count,
             start_vertex_location, start_instance_location);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     d3d12_command_list_flush_dgc_batch(list);
 
     if (list->predication.fallback_enabled)
@@ -9367,8 +9305,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_DrawIndexedInstanced(d3d12_comm
             "base_vertex_location %d, start_instance_location %u.\n",
             iface, index_count_per_instance, instance_count, start_vertex_location,
             base_vertex_location, start_instance_location);
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     d3d12_command_list_flush_dgc_batch(list);
 
@@ -9542,8 +9478,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_Dispatch(d3d12_command_list_ifa
 
     TRACE("iface %p, x %u, y %u, z %u.\n", iface, x, y, z);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     d3d12_command_list_check_render_pass_validation(list, "Dispatch called within a render pass.\n", true);
     d3d12_command_list_flush_dgc_batch(list);
 
@@ -9617,8 +9551,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyBufferRegion(d3d12_command_
     TRACE("iface %p, dst_resource %p, dst_offset %#"PRIx64", src_resource %p, "
             "src_offset %#"PRIx64", byte_count %#"PRIx64".\n",
             iface, dst, dst_offset, src, src_offset, byte_count);
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     d3d12_command_list_check_render_pass_validation(list, "CopyBufferRegion called within a render pass.\n", true);
     d3d12_command_list_flush_dgc_batch(list);
@@ -11297,8 +11229,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyTextureRegion(d3d12_command
     TRACE("iface %p, dst %p, dst_x %u, dst_y %u, dst_z %u, src %p, src_box %p.\n",
             iface, dst, dst_x, dst_y, dst_z, src, src_box);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     d3d12_command_list_check_render_pass_validation(list, "CopyTextureRegion called within a render pass.\n", true);
     d3d12_command_list_flush_dgc_batch(list);
     d3d12_command_list_begin_transfer(list);
@@ -11423,8 +11353,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyResource(d3d12_command_list
     unsigned int i, j;
 
     TRACE("iface %p, dst_resource %p, src_resource %p.\n", iface, dst, src);
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     d3d12_command_list_check_render_pass_validation(list, "CopyResource called within a render pass.\n", true);
     d3d12_command_list_flush_dgc_batch(list);
@@ -11922,8 +11850,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyTiles(d3d12_command_list_if
             "buffer %p, buffer_offset %#"PRIx64", flags %#x.\n",
             iface, tiled_resource, region_coord, region_size,
             buffer, buffer_offset, flags);
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     d3d12_command_list_check_render_pass_validation(list, "CopyTiles called within a render pass.\n", true);
     d3d12_command_list_flush_dgc_batch(list);
@@ -13018,8 +12944,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_ResolveSubresource(d3d12_comman
 
     TRACE("iface %p, dst_resource %p, dst_sub_resource_idx %u, src_resource %p, src_sub_resource_idx %u, "
             "format %#x.\n", iface, dst, dst_sub_resource_idx, src, src_sub_resource_idx, format);
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     d3d12_command_list_check_render_pass_validation(list, "ResolveSubresource called within a render pass.\n", true);
     d3d12_command_list_flush_dgc_batch(list);
@@ -14280,8 +14204,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_ResourceBarrier(d3d12_command_l
 
     if (d3d12_command_list_check_resource_barrier_read_only_upload(list, barrier_count, barriers))
         return;
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     /* Ignore enhanced barriers. They are much harder to reason about due to the transient nature of Vulkan-style
      * barriers. This is more or less just a workaround too for terribly written games,
@@ -15977,8 +15899,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearDepthStencilView(d3d12_com
     TRACE("iface %p, dsv %zx, flags %#x, depth %.8e, stencil 0x%02x, rect_count %u, rects %p.\n",
             iface, dsv.ptr, flags, depth, stencil, rect_count, rects);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     d3d12_command_list_check_render_pass_validation(list, "ClearDepthStencilView called within a render pass.\n", true);
     d3d12_command_list_flush_dgc_batch(list);
 
@@ -16112,8 +16032,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearRenderTargetView(d3d12_com
 
     TRACE("iface %p, rtv %zx, color %p, rect_count %u, rects %p.\n",
             iface, rtv.ptr, color, rect_count, rects);
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     d3d12_command_list_check_render_pass_validation(list, "ClearRenderTargetView called within a render pass.\n", true);
     d3d12_command_list_flush_dgc_batch(list);
@@ -17310,8 +17228,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearUnorderedAccessViewUint(d3
     TRACE("iface %p, gpu_handle %#"PRIx64", cpu_handle %zx, resource %p, values %p, rect_count %u, rects %p.\n",
             iface, gpu_handle.ptr, cpu_handle.ptr, resource, values, rect_count, rects);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     d3d12_command_list_check_render_pass_validation(list, "ClearUnorderedAccessViewUint called within a render pass.\n", true);
     d3d12_command_list_flush_dgc_batch(list);
 
@@ -17478,8 +17394,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_ClearUnorderedAccessViewFloat(d
 
     TRACE("iface %p, gpu_handle %#"PRIx64", cpu_handle %zx, resource %p, values %p, rect_count %u, rects %p.\n",
             iface, gpu_handle.ptr, cpu_handle.ptr, resource, values, rect_count, rects);
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     d3d12_command_list_check_render_pass_validation(list, "ClearUnorderedAccessViewFloat called within a render pass.\n", true);
     d3d12_command_list_flush_dgc_batch(list);
@@ -17746,22 +17660,26 @@ static void STDMETHODCALLTYPE d3d12_command_list_DiscardResource(d3d12_command_l
         vk_subresource_range.aspectMask = texture->format->vk_aspect_mask;
 
         d3d12_command_list_discard_attachment_barrier(list,
-                texture, &vk_subresource_range, !has_unbound_subresource, true);
+                texture, &vk_subresource_range, !has_unbound_subresource, NULL);
         VKD3D_BREADCRUMB_AUX32(~0u);
         VKD3D_BREADCRUMB_COMMAND(DISCARD);
     }
     else
     {
+        struct d3d12_command_list_barrier_batch batch;
+
+        d3d12_command_list_barrier_batch_init(&batch);
         for (i = first_subresource; i < first_subresource + subresource_count; i++)
         {
             vk_subresource = d3d12_resource_get_vk_subresource(texture, i, false);
             vk_subresource_range = vk_subresource_range_from_subresource(&vk_subresource);
 
             d3d12_command_list_discard_attachment_barrier(list,
-                    texture, &vk_subresource_range, !has_unbound_subresource, true);
+                    texture, &vk_subresource_range, !has_unbound_subresource, &batch);
             VKD3D_BREADCRUMB_AUX32(i);
             VKD3D_BREADCRUMB_COMMAND(DISCARD);
         }
+        d3d12_command_list_barrier_batch_end(list, &batch);
     }
 }
 
@@ -17946,8 +17864,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_BeginQuery(d3d12_command_list_i
 
     TRACE("iface %p, heap %p, type %#x, index %u.\n", iface, heap, type, index);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     if (!d3d12_query_type_is_scoped(type))
     {
         WARN("Query type %u is not scoped.\n", type);
@@ -17998,8 +17914,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_EndQuery(d3d12_command_list_ifa
     const struct vkd3d_vk_device_procs *vk_procs = &list->device->vk_procs;
 
     TRACE("iface %p, heap %p, type %#x, index %u.\n", iface, heap, type, index);
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     d3d12_command_list_flush_dgc_batch(list);
     d3d12_command_list_track_query_heap(list, query_heap);
@@ -18113,8 +18027,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_ResolveQueryData(d3d12_command_
             iface, heap, type, start_index, query_count,
             dst_buffer, aligned_dst_buffer_offset);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     if (query_heap->flags & D3D12_QUERY_HEAP_FLAG_CPU_RESOLVE)
     {
         WARN("ResolveQueryData is not allowed on CPU resolve heaps.\n");
@@ -18192,8 +18104,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetPredication(d3d12_command_li
 
     TRACE("iface %p, buffer %p, aligned_buffer_offset %#"PRIx64", operation %#x.\n",
             iface, buffer, aligned_buffer_offset, operation);
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     d3d12_command_list_flush_dgc_batch(list);
 
@@ -19013,8 +18923,6 @@ void d3d12_command_list_flush_dgc_batch(struct d3d12_command_list *list)
     if (list->dgc_batch.draws_count == 0)
         return;
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     vk_procs = &list->device->vk_procs;
 
     graphics_bindings = list->graphics_bindings;
@@ -19156,8 +19064,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_ExecuteIndirect(d3d12_command_l
             "arg_buffer_offset %#"PRIx64", count_buffer %p, count_buffer_offset %#"PRIx64".\n",
             iface, command_signature, max_command_count, arg_buffer, arg_buffer_offset,
             count_buffer, count_buffer_offset);
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     if (!max_command_count)
         return;
@@ -20361,8 +20267,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_ResolveSubresourceRegion(d3d12_
             iface, dst, dst_sub_resource_idx, dst_x, dst_y,
             src, src_sub_resource_idx, src_rect, format, mode);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     d3d12_command_list_check_render_pass_validation(list, "ResolveSubresourceRegion called within a render pass.\n", true);
     d3d12_command_list_flush_dgc_batch(list);
 
@@ -20570,8 +20474,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_WriteBufferImmediate(d3d12_comm
 
     TRACE("iface %p, count %u, parameters %p, modes %p.\n", iface, count, parameters, modes);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     if (!count)
         return;
 
@@ -20706,7 +20608,7 @@ static void d3d12_command_list_load_render_pass_rtv(struct d3d12_command_list *l
     else if (load_op == VK_ATTACHMENT_LOAD_OP_DONT_CARE)
     {
         subresource_range = vk_subresource_range_from_view(rtv_info->view);
-        d3d12_command_list_discard_attachment_barrier(list, rtv_info->resource, &subresource_range, false, false);
+        d3d12_command_list_discard_attachment_barrier(list, rtv_info->resource, &subresource_range, false, NULL);
     }
 }
 
@@ -20764,7 +20666,7 @@ static void d3d12_command_list_load_render_pass_dsv(struct d3d12_command_list *l
                     resource_subresource_count, resource_subresource_count);
         }
 
-        d3d12_command_list_discard_attachment_barrier(list, dsv_info->resource, &subresource_range, false, false);
+        d3d12_command_list_discard_attachment_barrier(list, dsv_info->resource, &subresource_range, false, NULL);
     }
 }
 
@@ -21258,8 +21160,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_BeginRenderPass(d3d12_command_l
     TRACE("iface %p, rt_count %u, render_targets %p, depth_stencil %p, flags %#x.\n",
             iface, rt_count, render_targets, depth_stencil, flags);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     d3d12_command_list_flush_dgc_batch(list);
 
     /* It's possible we're attempting to resume an existing suspend in the same command buffer,
@@ -21541,8 +21441,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_EndRenderPass(d3d12_command_lis
 
     TRACE("iface %p.\n", iface);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     if (!list->is_inside_render_pass)
     {
         d3d12_command_list_mark_as_invalid(list, "EndRenderPass called outside a render pass.\n");
@@ -21601,8 +21499,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_InitializeMetaCommand(d3d12_com
     TRACE("iface %p, meta_command %p, parameter_data %p, parameter_size %zu.\n",
             iface, meta_command, parameter_data, parameter_size);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     /* Not all meta commands require initialization */
     if (!meta_command_object->init_proc)
         return;
@@ -21624,8 +21520,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_ExecuteMetaCommand(d3d12_comman
 
     TRACE("iface %p, meta_command %p, parameter_data %p, parameter_size %zu.\n",
             iface, meta_command, parameter_data, parameter_size);
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     list->cmd.estimated_cost += VKD3D_COMMAND_COST_HIGH;
 
@@ -22290,8 +22184,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_BuildRaytracingAccelerationStru
     TRACE("iface %p, desc %p, num_postbuild_info_descs %u, postbuild_info_descs %p\n",
             iface, desc, num_postbuild_info_descs, postbuild_info_descs);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     d3d12_command_list_check_render_pass_validation(list, "BuildRaytracingAccelerationStructure called within a render pass.\n", true);
     d3d12_command_list_flush_dgc_batch(list);
     /* NON_PIXEL_SHADER_RESOURCE can be for VBO/IBO/Transfer buffer. */
@@ -22355,8 +22247,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_EmitRaytracingAccelerationStruc
     TRACE("iface %p, desc %p, num_acceleration_structures %u, src_data %p\n",
             iface, desc, num_acceleration_structures, src_data);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     d3d12_command_list_check_render_pass_validation(list, "EmitRaytracingAccelerationStructurePostbuildInfo called within a render pass.\n", true);
     d3d12_command_list_flush_dgc_batch(list);
 
@@ -22396,8 +22286,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_CopyRaytracingAccelerationStruc
 
     TRACE("iface %p, dst_data %#"PRIx64", src_data %#"PRIx64", mode %u\n",
           iface, dst_data, src_data, mode);
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     d3d12_command_list_check_render_pass_validation(list, "CopyRaytracingAccelerationStructure called within a render pass.\n", true);
     d3d12_command_list_flush_dgc_batch(list);
@@ -22514,8 +22402,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_DispatchRays(d3d12_command_list
     uint64_t width_times_height;
 
     TRACE("iface %p, desc %p\n", iface, desc);
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     d3d12_command_list_check_render_pass_validation(list, "DispatchRays called within a render pass.\n", true);
 
@@ -22696,8 +22582,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_DispatchMesh(d3d12_command_list
     struct vkd3d_scratch_allocation scratch;
 
     TRACE("iface %p, x %u, y %u, z %u.\n", iface, x, y, z);
-
-    d3d12_command_list_flush_discard_barriers(list);
 
     d3d12_command_list_flush_dgc_batch(list);
 
@@ -23390,8 +23274,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_Barrier(d3d12_command_list_ifac
     TRACE("iface %p, NumBarrierGroups %u, D3D12_BARRIER_GROUP %p\n",
             iface, NumBarrierGroups, pBarrierGroups);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     if (d3d12_command_list_barrier_is_noop(list, NumBarrierGroups, pBarrierGroups))
     {
         d3d12_command_list_debug_mark_label(list, "Noop Barrier", 1.0f, 0.0f, 0.0f, 1.0f);
@@ -23503,8 +23385,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetProgram(
     uint32_t wg_state_program_index;
     TRACE("iface %p, desc %p\n", iface, desc);
 
-    d3d12_command_list_flush_discard_barriers(list);
-
     if (desc->Type != D3D12_PROGRAM_TYPE_WORK_GRAPH)
     {
         FIXME("Unsupported type %u.\n", desc->Type);
@@ -23544,8 +23424,6 @@ static void STDMETHODCALLTYPE d3d12_command_list_DispatchGraph(
 {
     struct d3d12_command_list *list = impl_from_ID3D12GraphicsCommandList(iface);
     TRACE("iface %p, desc %p\n", iface, desc);
-
-    d3d12_command_list_flush_discard_barriers(list);
     d3d12_command_list_flush_dgc_batch(list);
     d3d12_command_list_workgraph_dispatch(list, desc);
 }

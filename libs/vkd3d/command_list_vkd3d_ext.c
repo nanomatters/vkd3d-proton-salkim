@@ -60,8 +60,6 @@ static HRESULT STDMETHODCALLTYPE d3d12_command_list_vkd3d_ext_GetVulkanHandle(d3
     if (!pVkCommandBuffer)
         return E_INVALIDARG;
 
-    d3d12_command_list_flush_discard_barriers(command_list);
-    command_list->discard_barriers.external_commands = true;
     *pVkCommandBuffer = command_list->cmd.vk_command_buffer;
     /* TODO: Do we need to block any attempt to split command buffers here?
      * Might be a problem if DLSS implementation caches the VkCommandBuffer across DLSS invocations. */
@@ -87,7 +85,6 @@ static HRESULT STDMETHODCALLTYPE d3d12_command_list_vkd3d_ext_LaunchCubinShaderE
     TRACE("iface %p, handle %p, block_x %u, block_y %u, block_z %u, smem_size %u, params %p, param_size %u, raw_params %p, raw_params_count %u\n",
            iface, handle, block_x, block_y, block_z, smem_size, params, param_size, raw_params, raw_params_count);
 
-    d3d12_command_list_flush_discard_barriers(command_list);
     d3d12_command_list_flush_dgc_batch(command_list);
     d3d12_command_list_update_global_descriptor_heap(command_list);
 
