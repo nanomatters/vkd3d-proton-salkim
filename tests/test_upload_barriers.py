@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Exercise upload-barrier classification and bookkeeping without a GPU.
 
-The helper and D3D12 declarations are extracted from the production sources.
-Resource tracking records calls. Rejected batches must leave the list untouched.
+The helpers, full ResourceBarrier handler and D3D12 declarations are extracted
+from production. Backend mocks record synchronization and resource tracking.
 """
 
 import argparse
@@ -38,7 +38,9 @@ def generate(source):
                                    "D3D12_RESOURCE_UAV_BARRIER", "D3D12_RESOURCE_BARRIER"))):
         pieces.extend(block(idl, "typedef " + kind + " " + name + "\n", True) for name in names)
     pieces += [MOCKS, block(source,
-        "static bool d3d12_command_list_check_resource_barrier_read_only_upload("), TESTS]
+        "static bool d3d12_resource_barrier_is_read_only_upload("), block(source,
+        "static bool d3d12_command_list_check_resource_barrier_read_only_upload("), HANDLER_MOCKS,
+        block(source, "static void STDMETHODCALLTYPE d3d12_command_list_ResourceBarrier("), TESTS]
     return "\n".join(pieces)
 
 
@@ -59,7 +61,9 @@ MOCKS = r'''
 struct d3d12_resource
 {
     struct { D3D12_HEAP_TYPE Type; } heap_properties;
-    struct { D3D12_RESOURCE_DIMENSION Dimension; } desc;
+    struct { D3D12_RESOURCE_DIMENSION Dimension; unsigned int Flags, MipLevels; } desc;
+    unsigned int flags;
+    struct { unsigned int vk_aspect_mask; } *format;
 };
 struct d3d12_command_list
 {
@@ -68,9 +72,16 @@ struct d3d12_command_list
     {
         uintptr_t vk_command_buffer, vk_post_indirect_barrier_commands;
         bool observes_indirect_argument_barrier;
+        struct { bool has_visible_clear_stage; } clear_uav;
     } cmd;
     struct d3d12_resource *tracked[8];
-    unsigned int tracked_count;
+    unsigned int tracked_count, vk_queue_flags, validated, breadcrumbs;
+    struct { bool pending_rtas_work; } rtas_batch;
+    struct
+    {
+        uint64_t masks[4];
+        uint64_t maps, merges, globals, images, uav, rtas, clears, aliases, batches;
+    } sync;
 };
 #define impl_from_ID3D12Resource(r) (r)
 #define d3d12_resource_is_buffer(r) ((r)->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
@@ -81,6 +92,93 @@ static void d3d12_command_list_track_resource_usage(struct d3d12_command_list *l
     assert(initial_transition);
     assert(list->tracked_count < ARRAY_SIZE(list->tracked));
     list->tracked[list->tracked_count++] = resource;
+}
+'''
+
+
+# Compile the complete production dispatcher. Only backend calls and the unrelated
+# deferred-copy optimization are mocked; no barrier loop/filtering is reimplemented.
+HANDLER_MOCKS = r'''
+typedef struct d3d12_command_list d3d12_command_list_iface;
+typedef uint64_t VkAccessFlags2, VkPipelineStageFlags2;
+typedef unsigned int VkImageLayout;
+typedef struct { unsigned int aspectMask, baseArrayLayer, layerCount, mipLevel; } VkImageSubresourceLayers;
+typedef VkImageSubresourceLayers VkImageSubresource;
+typedef struct { unsigned int unused; } VkImageMemoryBarrier2;
+struct d3d12_command_list_barrier_batch
+{
+    struct { uint64_t srcStageMask, srcAccessMask, dstStageMask, dstAccessMask; } vk_memory_barrier;
+};
+#define STDMETHODCALLTYPE
+#define impl_from_ID3D12GraphicsCommandList(iface) (iface)
+#define d3d12_resource_is_texture(r) (!d3d12_resource_is_buffer(r))
+#define d3d12_resource_is_acceleration_structure(r) false
+#define d3d12_resource_may_alias_other_resources(r) true
+#define VK_IMAGE_LAYOUT_UNDEFINED 0
+#define VKD3D_RESOURCE_COPY_QUEUE_COMPATIBLE 1
+#define VKD3D_RESOURCE_LINEAR_STAGING_COPY 2
+#define D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL 1
+#define VK_ACCESS_2_MEMORY_READ_BIT (UINT64_C(1) << 60)
+#define VK_ACCESS_2_MEMORY_WRITE_BIT (UINT64_C(1) << 61)
+#define VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT (UINT64_C(1) << 62)
+#define WARN(...) ((void)0)
+#define FIXME_ONCE(...) ((void)0)
+#define VKD3D_CONFIG_FLAG_IS_SET(...) false
+#define VKD3D_BREADCRUMB_COOKIE(...) ((void)0)
+#define VKD3D_BREADCRUMB_AUX32(...) ((void)0)
+#define VKD3D_BREADCRUMB_TAG(...) (++list->breadcrumbs)
+#define VKD3D_BREADCRUMB_COMMAND(...) ((void)0)
+#define is_valid_resource_state(state) (++list->validated, true)
+#define d3d12_command_list_mark_as_invalid(...) assert(false)
+#define d3d12_command_list_check_resource_barrier_trivial_copy_resource(...) false
+#define d3d12_command_list_flush_dgc_batch(...) ((void)0)
+#define d3d12_command_list_end_current_render_pass(...) ((void)0)
+#define d3d12_command_list_end_transfer_batch(...) ((void)0)
+#define d3d12_command_list_debug_mark_begin_region(...) ((void)0)
+#define d3d12_command_list_debug_mark_end_region(...) ((void)0)
+#define d3d12_command_list_check_render_pass_validation(...) ((void)0)
+#define d3d12_command_list_debug_mark_label(...) ((void)0)
+#define d3d12_command_list_debug_mark_label_printf(...) ((void)0)
+#define d3d12_command_list_copy_queue_fallback(...) assert(false)
+#define d3d12_command_list_flush_rtas_batch(l) (++(l)->sync.rtas)
+#define d3d12_command_list_flush_clears(l, ...) (++(l)->sync.clears)
+#define d3d12_resource_desc_get_layer_count(...) 1
+#define d3d12_resource_get_vk_subresource(...) ((VkImageSubresource){0})
+#define vk_subresource_layers_from_subresource(s) (*(s))
+#define d3d12_command_list_update_subresource_data(l, r, s) ((void)(s), assert(false))
+#define d3d12_command_list_notify_dsv_state(...) 0
+#define vk_image_layout_from_d3d12_resource_state(l, r, state) (state)
+#define d3d12_command_list_merge_copy_tracking_transition(l, ...) (++(l)->sync.merges)
+#define d3d12_command_list_consume_clear_uav_barrier_batch(...) (++list->sync.uav)
+#define d3d12_command_list_consume_clear_uav_global_barrier(...) (++list->sync.uav)
+#define d3d12_command_list_flush_subresource_updates(l) (++(l)->sync.aliases)
+#define d3d12_command_list_barrier_batch_init(b) memset((b), 0, sizeof(*(b)))
+#define d3d12_command_list_barrier_batch_end(l, b) \
+    (memcpy((l)->sync.masks, &(b)->vk_memory_barrier, sizeof((l)->sync.masks)), ++(l)->sync.batches)
+#define vk_image_memory_barrier_for_transition(b, r, s, old, new, ss, sa, ds, da, decay) \
+    ((void)(b), (void)(old), (void)(new), (void)(decay))
+#define d3d12_command_list_barrier_batch_add_layout_transition(l, b, t) (++(l)->sync.images)
+
+static void vk_access_and_stage_flags_from_d3d12_resource_state(struct d3d12_command_list *list,
+        struct d3d12_resource *resource, D3D12_RESOURCE_STATES state, unsigned int queue_flags,
+        VkPipelineStageFlags2 *stages, VkAccessFlags2 *access)
+{
+    (void)queue_flags;
+    assert(resource && resource->heap_properties.Type != D3D12_HEAP_TYPE_UPLOAD);
+    *stages |= UINT64_C(1) << resource->desc.Dimension;
+    *access |= state;
+    list->sync.maps++;
+}
+
+static void d3d12_command_list_barrier_batch_add_global_transition(struct d3d12_command_list *list,
+        struct d3d12_command_list_barrier_batch *batch, uint64_t src_stage, uint64_t src_access,
+        uint64_t dst_stage, uint64_t dst_access)
+{
+    batch->vk_memory_barrier.srcStageMask |= src_stage;
+    batch->vk_memory_barrier.srcAccessMask |= src_access;
+    batch->vk_memory_barrier.dstStageMask |= dst_stage;
+    batch->vk_memory_barrier.dstAccessMask |= dst_access;
+    list->sync.globals++;
 }
 '''
 
@@ -118,7 +216,8 @@ static void reject(D3D12_COMMAND_LIST_TYPE type, unsigned int count,
 
 static void reject_alone_and_mixed(D3D12_RESOURCE_BARRIER invalid)
 {
-    struct d3d12_resource upload = {{D3D12_HEAP_TYPE_UPLOAD}, {D3D12_RESOURCE_DIMENSION_BUFFER}};
+    struct d3d12_resource upload = {.heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD,
+        .desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER};
     D3D12_RESOURCE_BARRIER barriers[] = {
         transition(&upload, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, D3D12_RESOURCE_STATE_GENERIC_READ),
         invalid,
@@ -128,9 +227,76 @@ static void reject_alone_and_mixed(D3D12_RESOURCE_BARRIER invalid)
     reject(D3D12_COMMAND_LIST_TYPE_DIRECT, ARRAY_SIZE(barriers), barriers);
 }
 
+static void test_mixed_batches(void)
+{
+    struct d3d12_resource upload = {.heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD,
+        .desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER};
+    struct d3d12_resource buffer = upload, image = upload;
+    D3D12_RESOURCE_BARRIER base[4], mixed[6];
+    D3D12_RESOURCE_BARRIER read = transition(&upload, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_GENERIC_READ);
+    D3D12_RESOURCE_BARRIER tail = transition(&upload, D3D12_RESOURCE_STATE_GENERIC_READ,
+        D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+    buffer.heap_properties.Type = image.heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    image.desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    base[0] = transition(&buffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+    base[1] = (D3D12_RESOURCE_BARRIER){.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV, .UAV.pResource = &buffer};
+    base[2] = (D3D12_RESOURCE_BARRIER){.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING,
+        .Aliasing = {.pResourceBefore = &buffer, .pResourceAfter = &buffer}};
+    base[3] = transition(&image, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    for (unsigned int type = D3D12_COMMAND_LIST_TYPE_DIRECT; type <= D3D12_COMMAND_LIST_TYPE_COMPUTE; type += 2)
+    for (unsigned int group = 0; group <= ARRAY_SIZE(base); group++)
+    {
+        unsigned int n = group == ARRAY_SIZE(base) ? ARRAY_SIZE(base) : 1;
+        const D3D12_RESOURCE_BARRIER *selected = n == 1 ? &base[group] : base;
+        struct d3d12_command_list baseline = new_list(type);
+        d3d12_command_list_ResourceBarrier(&baseline, n, selected);
+        assert(baseline.sync.batches == 1);
+        assert(baseline.sync.maps == (n == 1 ? (group == 2 ? 0 : 2) : 6));
+        assert(baseline.sync.globals == (n > 1 || group == 0));
+        assert(baseline.sync.images == (n > 1 || group == 3));
+        assert(baseline.sync.uav == (n == 1 ? (group == 1 || group == 2) : 2));
+        assert(!baseline.cmd.observes_indirect_argument_barrier);
+        for (unsigned int reverse = 0; reverse < 2; reverse++)
+        for (unsigned int insert = 0; insert <= n; insert++)
+        {
+            struct d3d12_command_list list = new_list(type);
+            unsigned int count = 0, tracked = 0, transitions = 0;
+            for (unsigned int j = 0; j <= n; j++)
+            {
+                if (j == insert)
+                    mixed[count++] = read;
+                if (j < n)
+                    mixed[count++] = selected[reverse ? n - 1 - j : j];
+            }
+            mixed[count++] = tail; /* Later non-indirect reads must retain indirect bookkeeping. */
+            d3d12_command_list_ResourceBarrier(&list, count, mixed);
+            assert(!memcmp(&baseline.sync, &list.sync, sizeof(list.sync)));
+            assert(list.cmd.observes_indirect_argument_barrier);
+            assert(list.cmd.vk_post_indirect_barrier_commands == list.cmd.vk_command_buffer);
+            assert(list.breadcrumbs == count);
+            for (unsigned int j = 0; j < count; j++)
+            {
+                if (mixed[j].Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION)
+                {
+                    transitions++;
+                    assert(list.tracked[tracked++] == mixed[j].Transition.pResource);
+                }
+                else if (mixed[j].Type == D3D12_RESOURCE_BARRIER_TYPE_UAV)
+                    assert(list.tracked[tracked++] == mixed[j].UAV.pResource);
+            }
+            assert(list.tracked_count == tracked && list.validated == 2 * transitions);
+            cases++;
+        }
+    }
+}
+
 int main(void)
 {
-    struct d3d12_resource upload = {{D3D12_HEAP_TYPE_UPLOAD}, {D3D12_RESOURCE_DIMENSION_BUFFER}};
+    struct d3d12_resource upload = {.heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD,
+        .desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER};
     struct d3d12_resource other = upload;
     D3D12_RESOURCE_BARRIER valid = transition(&upload,
         D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER), bad;
@@ -222,6 +388,7 @@ int main(void)
         assert(list.cmd.vk_post_indirect_barrier_commands == list.cmd.vk_command_buffer);
         cases++;
     }
+    test_mixed_batches();
     printf("Upload barriers: %u cases passed\n", cases);
     return 0;
 }
