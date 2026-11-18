@@ -10942,6 +10942,13 @@ bool d3d12_device_validate_shader_meta(struct d3d12_device *device, const struct
         return false;
     }
 
+    if ((meta->flags & VKD3D_SHADER_META_FLAG_USES_RAY_QUERY) &&
+            (!device->device_info.ray_query_features.rayQuery || !d3d12_device_supports_ray_tracing_tier_1_0(device)))
+    {
+        WARN("Shader %016"PRIx64" requires inline ray tracing.\n", meta->hash);
+        return false;
+    }
+
     if ((meta->flags & VKD3D_SHADER_META_FLAG_USES_RASTERIZER_ORDERED_VIEWS) &&
             !device->d3d12_caps.options.ROVsSupported)
     {
