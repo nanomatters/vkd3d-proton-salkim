@@ -2309,6 +2309,77 @@ void test_raytracing(void)
     vkd3d_test_set_context(NULL);
 }
 
+void test_rayquery_pipeline_support(void)
+{
+    static const D3D12_DESCRIPTOR_RANGE ranges[] =
+    {
+        {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, 0},
+        {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 2},
+        {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0, 3},
+    };
+    static const D3D12_ROOT_PARAMETER table =
+    {
+        .ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+        .DescriptorTable = {ARRAY_SIZE(ranges), ranges},
+        .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL,
+    };
+    static const D3D12_ROOT_SIGNATURE_DESC rs_desc = {1, &table};
+    D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {0};
+    D3D12_FEATURE_DATA_SHADER_MODEL model = {D3D_SHADER_MODEL_6_5};
+    D3D12_FEATURE_DATA_D3D12_OPTIONS5 options;
+    ID3D12PipelineState *pso = NULL;
+    struct test_context context;
+    HRESULT hr;
+
+#include "shaders/shaders/headers/cs_plain_mad.h"
+
+    if (!init_compute_test_context(&context))
+        return;
+
+    hr = ID3D12Device_CheckFeatureSupport(context.device, D3D12_FEATURE_SHADER_MODEL, &model, sizeof(model));
+    if (FAILED(hr) || model.HighestShaderModel < D3D_SHADER_MODEL_6_5)
+    {
+        skip("Shader model 6.5 unavailable.\n");
+        goto done;
+    }
+
+    hr = ID3D12Device_CheckFeatureSupport(context.device, D3D12_FEATURE_D3D12_OPTIONS5, &options, sizeof(options));
+    if (FAILED(hr))
+    {
+        skip("Ray tracing tier unavailable.\n");
+        goto done;
+    }
+
+    hr = create_root_signature(context.device, &rs_desc, &context.root_signature);
+    ok(hr == S_OK, "Failed to create root signature, hr %#x.\n", (int)hr);
+    if (FAILED(hr))
+        goto done;
+
+    desc.pRootSignature = context.root_signature;
+    desc.CS = get_rayquery_shader();
+    hr = ID3D12Device_CreateComputePipelineState(context.device, &desc, &IID_ID3D12PipelineState, (void **)&pso);
+    if (is_vkd3d_proton_device(context.device) &&
+            (options.RaytracingTier < D3D12_RAYTRACING_TIER_1_1 ||
+             !is_vk_device_extension_supported(context.device, VK_KHR_RAY_QUERY_EXTENSION_NAME)))
+        ok(hr == E_INVALIDARG && !pso, "Expected E_INVALIDARG, got hr %#x, pso %p.\n", (int)hr, pso);
+    else if (options.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1)
+        ok(hr == S_OK, "Failed to create ray-query PSO, hr %#x.\n", (int)hr);
+    else if (options.RaytracingTier == D3D12_RAYTRACING_TIER_NOT_SUPPORTED)
+        ok(FAILED(hr) && !pso, "Unsupported ray-query PSO returned hr %#x, pso %p.\n", (int)hr, pso);
+    if (pso)
+        ID3D12PipelineState_Release(pso);
+
+    desc.CS = cs_plain_mad_dxil;
+    pso = NULL;
+    hr = ID3D12Device_CreateComputePipelineState(context.device, &desc, &IID_ID3D12PipelineState, (void **)&pso);
+    ok(hr == S_OK, "Failed to create ordinary compute PSO, hr %#x.\n", (int)hr);
+    if (pso)
+        ID3D12PipelineState_Release(pso);
+
+done:
+    destroy_test_context(&context);
+}
+
 static void test_rayquery_pipeline(enum rt_test_mode mode, bool root_table)
 {
     /* Intended to mirror the test case for RTPSO closely. */

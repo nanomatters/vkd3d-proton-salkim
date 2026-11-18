@@ -1554,6 +1554,7 @@ int vkd3d_shader_compile_dxil(const struct vkd3d_shader_code *dxbc,
             vkd3d_shader_replace(hash, &spirv->code, &spirv->size))
     {
         spirv->meta.flags |= VKD3D_SHADER_META_FLAG_REPLACED;
+        vkd3d_shader_extract_feature_meta(spirv);
         return ret;
     }
 
@@ -1834,6 +1835,7 @@ int vkd3d_shader_compile_dxil_export(const struct vkd3d_shader_code *dxil,
     if (demangled_export && vkd3d_shader_replace_export(hash, &spirv->code, &spirv->size, demangled_export))
     {
         spirv->meta.flags |= VKD3D_SHADER_META_FLAG_REPLACED;
+        vkd3d_shader_extract_feature_meta(spirv);
         return ret;
     }
 

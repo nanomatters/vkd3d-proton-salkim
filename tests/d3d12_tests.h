@@ -379,6 +379,7 @@ decl_test(test_unbound_rtv_rendering);
 decl_test(test_raytracing_local_rs_static_sampler);
 decl_test(test_raytracing_local_rs_static_sampler_collection);
 decl_test(test_raytracing_object_assignment_ignore_default);
+decl_test(test_rayquery_pipeline_support);
 decl_test(test_rayquery_root_desc);
 decl_test(test_rayquery_root_table);
 decl_test(test_raytracing_multi_global_rs);

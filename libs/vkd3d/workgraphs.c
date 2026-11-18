@@ -2309,10 +2309,7 @@ static HRESULT d3d12_wg_state_object_convert_entry_point(
         return E_OUTOFMEMORY;
     }
 
-    if (!d3d12_device_validate_shader_meta(object->device, &spirv.meta))
-        hr = E_INVALIDARG;
-    else
-        hr = d3d12_pipeline_state_create_shader_module(object->device, &module->vk_module, &spirv);
+    hr = d3d12_pipeline_state_create_shader_module(object->device, &module->vk_module, &spirv);
 
     vkd3d_shader_free_shader_code(&spirv);
     return hr;

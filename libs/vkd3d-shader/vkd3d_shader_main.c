@@ -551,7 +551,7 @@ uint64_t vkd3d_shader_get_revision(vkd3d_shader_quirks_t *aux_quirks)
     if (aux_quirks)
         *aux_quirks = quirks;
 
-    return quirk_hash ^ 1;
+    return quirk_hash ^ 2;
 }
 
 struct vkd3d_shader_stage_io_entry *vkd3d_shader_stage_io_map_append(struct vkd3d_shader_stage_io_map *map,
@@ -874,6 +874,11 @@ void vkd3d_shader_extract_feature_meta(struct vkd3d_shader_code *code)
                 default:
                     break;
             }
+        }
+        else if (op == SpvOpTypeRayQueryKHR)
+        {
+            /* RayTraversalPrimitiveCullingKHR can imply RayQueryKHR. */
+            meta |= VKD3D_SHADER_META_FLAG_USES_RAY_QUERY;
         }
         else if (op == SpvOpEntryPoint && count >= 2)
         {

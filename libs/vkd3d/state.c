@@ -2714,6 +2714,9 @@ HRESULT d3d12_pipeline_state_create_shader_module(struct d3d12_device *device,
     VkShaderModuleCreateInfo shader_desc;
     VkResult vr;
 
+    if (!d3d12_device_validate_shader_meta(device, &code->meta))
+        return E_INVALIDARG;
+
     shader_desc.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     shader_desc.pNext = NULL;
     shader_desc.flags = 0;
@@ -3181,6 +3184,7 @@ static HRESULT vkd3d_setup_shader_stage(struct d3d12_pipeline_state *state, stru
         const struct vkd3d_shader_code *spirv_code)
 {
     bool override_subgroup_size = false;
+    HRESULT hr;
 
     stage_desc->sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stage_desc->pNext = d3d12_device_use_descriptor_heap(device) ? &state->root_signature->heap.mapping_info : NULL;
@@ -3190,11 +3194,18 @@ static HRESULT vkd3d_setup_shader_stage(struct d3d12_pipeline_state *state, stru
     stage_desc->pSpecializationInfo = NULL;
     stage_desc->module = VK_NULL_HANDLE;
 
-    if (!d3d12_device_validate_shader_meta(device, &spirv_code->meta))
-        return E_INVALIDARG;
-
-    if (!spirv_code->size && identifier_create_info && identifier_create_info->identifierSize)
-        vk_prepend_struct(stage_desc, identifier_create_info);
+    if (spirv_code->size)
+    {
+        if (FAILED(hr = d3d12_pipeline_state_create_shader_module(device, &stage_desc->module, spirv_code)))
+            return hr;
+    }
+    else
+    {
+        if (!d3d12_device_validate_shader_meta(device, &spirv_code->meta))
+            return E_INVALIDARG;
+        if (identifier_create_info && identifier_create_info->identifierSize)
+            vk_prepend_struct(stage_desc, identifier_create_info);
+    }
 
     if ((spirv_code->meta.flags & VKD3D_SHADER_META_FLAG_USES_SUBGROUP_OPERATIONS) ||
             spirv_code->meta.cs_wave_size_min)
@@ -3272,7 +3283,7 @@ static HRESULT vkd3d_setup_shader_stage(struct d3d12_pipeline_state *state, stru
 
         /* If we can, we should be explicit and enable FULL_SUBGROUPS bit as well. This should be default
          * behavior, but cannot hurt. */
-        if (stage == VK_SHADER_STAGE_COMPUTE_BIT &&
+        if (stage == VK_SHADER_STAGE_COMPUTE_BIT && spirv_code->meta.cs_workgroup_size[0] &&
                 !(spirv_code->meta.cs_workgroup_size[0] % subgroup_size_alignment))
         {
             stage_desc->flags |= VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
@@ -3290,10 +3301,7 @@ static HRESULT vkd3d_setup_shader_stage(struct d3d12_pipeline_state *state, stru
 
     assert(state->root_signature->heap.mapping_info.pNext == NULL);
 
-    if (spirv_code->size)
-        return d3d12_pipeline_state_create_shader_module(device, &stage_desc->module, spirv_code);
-    else
-        return S_OK;
+    return S_OK;
 }
 
 static HRESULT vkd3d_compile_shader_stage(struct d3d12_pipeline_state *state, struct d3d12_device *device,
@@ -4931,6 +4939,8 @@ static void d3d12_pipeline_state_graphics_load_spirv_from_cached_state(
                     INFO("Discarding cached SPIR-V for stage #%x.\n", graphics->cached_desc.bytecode_stages[j]);
                 vkd3d_shader_free_shader_code(&graphics->code[j]);
                 memset(&graphics->code[j], 0, sizeof(graphics->code[j]));
+                graphics->identifier_create_infos[j].identifierSize = 0;
+                graphics->identifier_create_infos[j].pIdentifier = NULL;
             }
             break;
         }

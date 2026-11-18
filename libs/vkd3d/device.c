@@ -11003,7 +11003,9 @@ bool d3d12_device_validate_shader_meta(struct d3d12_device *device, const struct
 
     if (meta->flags & VKD3D_SHADER_META_FLAG_USES_RAY_QUERY)
     {
-        if (device->d3d12_caps.options5.RaytracingTier < D3D12_RAYTRACING_TIER_1_1)
+        if (device->d3d12_caps.options5.RaytracingTier < D3D12_RAYTRACING_TIER_1_1 ||
+                !device->device_info.ray_query_features.rayQuery ||
+                !d3d12_device_supports_ray_tracing_tier_1_0(device))
         {
             ERR("Requested rayquery but not exposed by device.\n");
             return false;
