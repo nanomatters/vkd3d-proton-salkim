@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # Copyright 2026 Erhan Bilgili
 # SPDX-License-Identifier: LGPL-2.1-or-later
-"""Record enhanced ClearUAV barriers using production handlers and tracking.
+"""Record enhanced ClearUAV and constant-buffer barriers using production code.
 
-No GPU is needed. Resource/layout helpers are stubbed; synchronization conversion,
-clear registration, consumption and all three enhanced barrier handlers are real.
+No GPU is needed. The test uses the real synchronization conversion, clear
+tracking and barrier handlers with stubbed resource and layout helpers.
 """
 
 import argparse
@@ -40,6 +40,7 @@ def generate(source):
                                    "D3D12_TEXTURE_BARRIER", "D3D12_BUFFER_BARRIER"))):
         pieces.extend(block(idl, "typedef " + kind + " " + name + "\n", True) for name in names)
     pieces.append(block(header, "struct d3d12_command_list_clear_uav_tracking\n", True))
+    pieces.append(block(header, "enum vkd3d_bindless_flags\n", True))
     pieces.append(MOCKS)
     for prefix, name in (
         ("void ", "d3d12_command_list_register_clear_uav_pending"),
@@ -93,6 +94,7 @@ struct d3d12_resource
 };
 struct d3d12_device
 {
+    struct { unsigned int flags; } bindless_state;
     struct
     {
         struct { bool attachmentFragmentShadingRate; } fragment_shading_rate_features;
@@ -230,8 +232,32 @@ static void run_case(unsigned int route, unsigned int scope, bool destination)
     cases++;
 }
 
+static void test_constant_buffer_access(void)
+{
+    const D3D12_BARRIER_ACCESS cbv = D3D12_BARRIER_ACCESS_CONSTANT_BUFFER;
+    const VkAccessFlags2 uniform = VK_ACCESS_2_UNIFORM_READ_BIT;
+    struct d3d12_device device = {0};
+    struct d3d12_command_list list = { .device = &device, .vk_queue_flags = VK_QUEUE_COMPUTE_BIT };
+
+    assert(vk_access_flags_from_d3d12_barrier(&list, D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+            cbv, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT) == uniform);
+
+    device.bindless_state.flags = VKD3D_HEAP_COMPUTE_ROOT_CBV_BDA;
+    assert(vk_access_flags_from_d3d12_barrier(&list, D3D12_BARRIER_SYNC_COMPUTE_SHADING,
+            cbv, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT) == (uniform | VK_ACCESS_2_SHADER_STORAGE_READ_BIT));
+    assert(vk_access_flags_from_d3d12_barrier(&list, D3D12_BARRIER_SYNC_ALL,
+            cbv, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) == (uniform | VK_ACCESS_2_SHADER_STORAGE_READ_BIT));
+    assert(vk_access_flags_from_d3d12_barrier(&list, D3D12_BARRIER_SYNC_PIXEL_SHADING,
+            cbv, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT) == uniform);
+
+    list.vk_queue_flags = VK_QUEUE_TRANSFER_BIT;
+    assert(vk_access_flags_from_d3d12_barrier(&list, D3D12_BARRIER_SYNC_ALL,
+            cbv, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT) == uniform);
+}
+
 int main(void)
 {
+    test_constant_buffer_access();
     for (unsigned int route = 0; route < 3; route++)
         for (unsigned int scope = 0; scope < 5; scope++)
             for (unsigned int destination = 0; destination < 2; destination++)

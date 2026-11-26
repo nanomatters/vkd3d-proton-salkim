@@ -216,6 +216,9 @@ commas or semicolons.
     - `single_queue` - Do not use asynchronous compute or transfer queues.
     - `descriptor_heap` - Enables `VK_EXT_descriptor_heap` on NVIDIA drivers older than 620.70.06 when supported.
     - `no_descriptor_heap` - Disables `VK_EXT_descriptor_heap`, taking precedence over `descriptor_heap`.
+    - `no_nv_heap_cbv_bda` - Disables the workaround for stale compute root constant buffers on
+      proprietary NVIDIA drivers 620.70.06 and newer. With descriptor heaps enabled, the workaround reads
+      compute root CBVs directly through their device addresses.
     - `no_upload_hvv` - Blocks any attempt to use host-visible VRAM (large/resizable BAR) for the UPLOAD heap.
       May free up vital VRAM in certain critical situations, at cost of lower GPU performance.
       A fraction of VRAM is reserved for resizable BAR allocations either way,

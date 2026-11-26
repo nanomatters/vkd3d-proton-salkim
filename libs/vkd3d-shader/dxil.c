@@ -1,6 +1,6 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-22, 2026-09-26, 2026-10-03, 2026-10-14.
+ * 2026-09-22, 2026-09-26, 2026-10-03, 2026-10-14, 2026-11-27.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2020 Hans-Kristian Arntzen for Valve Corporation
@@ -195,7 +195,8 @@ static dxil_spv_bool dxil_remap_inner(
                     return DXIL_SPV_FALSE;
 
                 if ((remap->shader_interface_flags & VKD3D_SHADER_INTERFACE_HEAP_LOWERING) &&
-                    (descriptor_type == VKD3D_SHADER_DESCRIPTOR_TYPE_CBV ||
+                    (descriptor_type == VKD3D_SHADER_DESCRIPTOR_TYPE_CBV ?
+                        !(remap->shader_interface_flags & VKD3D_SHADER_INTERFACE_ROOT_CBV_BDA) :
                         d3d_binding->kind == DXIL_SPV_RESOURCE_KIND_RT_ACCELERATION_STRUCTURE ||
                         remap->min_ssbo_alignment <= d3d_binding->alignment))
                 {
@@ -211,8 +212,7 @@ static dxil_spv_bool dxil_remap_inner(
                 }
                 else
                 {
-                    /* In some cases we cannot use SSBOs due to alignment requirements.
-                     * Just fallback to good old BDA. */
+                    /* Use the device address stored in push data. */
                     vk_binding->descriptor_type = DXIL_SPV_VULKAN_DESCRIPTOR_TYPE_BUFFER_DEVICE_ADDRESS;
                     vk_binding->root_constant_index = root_descriptor_index;
                 }

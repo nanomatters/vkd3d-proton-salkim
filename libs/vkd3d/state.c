@@ -1,6 +1,6 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-08, 2026-09-22.
+ * 2026-09-08, 2026-09-22, 2026-11-27.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -3084,6 +3084,8 @@ static void d3d12_pipeline_state_init_shader_interface(struct d3d12_pipeline_sta
     const struct d3d12_root_signature *root_signature = state->root_signature;
     memset(shader_interface, 0, sizeof(*shader_interface));
     shader_interface->flags = d3d12_root_signature_get_shader_interface_flags(root_signature, state->pipeline_type);
+    if (stage == VK_SHADER_STAGE_COMPUTE_BIT && (device->bindless_state.flags & VKD3D_HEAP_COMPUTE_ROOT_CBV_BDA))
+        shader_interface->flags |= VKD3D_SHADER_INTERFACE_ROOT_CBV_BDA;
     shader_interface->min_ssbo_alignment = d3d12_device_get_ssbo_alignment(device);
     shader_interface->descriptor_tables.offset = root_signature->descriptor_table_offset;
     shader_interface->descriptor_tables.count = root_signature->descriptor_table_count;
@@ -8154,6 +8156,15 @@ static HRESULT vkd3d_bindless_state_init_heap(struct vkd3d_bindless_state *bindl
         bindless_state->cbv_srv_uav_size,
         bindless_state->sampler_size,
         (bindless_state->heap.uav_counter_embedded_offset ? "on" : "off"));
+
+    if (!VKD3D_CONFIG_FLAG_IS_SET(NO_NV_HEAP_CBV_BDA) &&
+            !VKD3D_CONFIG_FLAG_IS_SET(SKIP_DRIVER_WORKAROUNDS) &&
+            device_info->vulkan_1_2_properties.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY &&
+            device_info->properties2.properties.driverVersion >= VKD3D_DRIVER_VERSION_MAKE_NV(620, 70, 6))
+    {
+        bindless_state->flags |= VKD3D_HEAP_COMPUTE_ROOT_CBV_BDA;
+        INFO("Using device addresses for compute root CBVs to avoid stale NVIDIA constant-buffer reads.\n");
+    }
 
     /* Too much content in the wild is just straight up broken.
      * Apply heap robustness globally when using heap.

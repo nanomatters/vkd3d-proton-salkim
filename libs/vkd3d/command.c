@@ -1,7 +1,7 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
  * 2026-09-11, 2026-09-12, 2026-09-18, 2026-09-26, 2026-09-29,
- * 2026-10-10.
+ * 2026-10-10, 2026-11-27.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -22775,7 +22775,7 @@ static VkPipelineStageFlags2 vk_stage_flags_from_d3d12_barrier(struct d3d12_comm
 }
 
 static VkAccessFlags2 vk_access_flags_from_d3d12_barrier(struct d3d12_command_list *list,
-        D3D12_BARRIER_SYNC sync, D3D12_BARRIER_ACCESS access)
+        D3D12_BARRIER_SYNC sync, D3D12_BARRIER_ACCESS access, VkPipelineStageFlags2 stages)
 {
     VkAccessFlags2 vk_access = 0;
 
@@ -22787,7 +22787,14 @@ static VkAccessFlags2 vk_access_flags_from_d3d12_barrier(struct d3d12_command_li
     if (access & D3D12_BARRIER_ACCESS_VERTEX_BUFFER)
         vk_access |= VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
     if (access & D3D12_BARRIER_ACCESS_CONSTANT_BUFFER)
+    {
         vk_access |= VK_ACCESS_2_UNIFORM_READ_BIT;
+        /* Direct-address compute root CBVs also need storage-buffer visibility. */
+        if ((stages & (VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) &&
+                (list->vk_queue_flags & VK_QUEUE_COMPUTE_BIT) &&
+                (list->device->bindless_state.flags & VKD3D_HEAP_COMPUTE_ROOT_CBV_BDA))
+            vk_access |= VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+    }
     if (access & D3D12_BARRIER_ACCESS_INDEX_BUFFER)
         vk_access |= VK_ACCESS_2_INDEX_READ_BIT;
     if (access & D3D12_BARRIER_ACCESS_RENDER_TARGET)
@@ -22990,8 +22997,8 @@ static void d3d12_command_list_process_enhanced_barrier_global(struct d3d12_comm
 
     src_stages = vk_stage_flags_from_d3d12_barrier(list, barrier->SyncBefore, barrier->AccessBefore);
     dst_stages = vk_stage_flags_from_d3d12_barrier(list, barrier->SyncAfter, barrier->AccessAfter);
-    src_access = vk_access_flags_from_d3d12_barrier(list, barrier->SyncBefore, barrier->AccessBefore);
-    dst_access = vk_access_flags_from_d3d12_barrier(list, barrier->SyncAfter, barrier->AccessAfter);
+    src_access = vk_access_flags_from_d3d12_barrier(list, barrier->SyncBefore, barrier->AccessBefore, src_stages);
+    dst_access = vk_access_flags_from_d3d12_barrier(list, barrier->SyncAfter, barrier->AccessAfter, dst_stages);
 
     /* Global and buffer copy barriers also cover WriteBufferImmediate, which
      * uses Vulkan's CLEAR stage. Texture copies do not need that stage. */
@@ -23181,8 +23188,10 @@ static void d3d12_command_list_process_enhanced_barrier_texture(struct d3d12_com
 
     vk_transition.srcStageMask = vk_stage_flags_from_d3d12_barrier(list, barrier->SyncBefore, barrier->AccessBefore);
     vk_transition.dstStageMask = vk_stage_flags_from_d3d12_barrier(list, barrier->SyncAfter, barrier->AccessAfter);
-    vk_transition.srcAccessMask = vk_access_flags_from_d3d12_barrier(list, barrier->SyncBefore, barrier->AccessBefore);
-    vk_transition.dstAccessMask = vk_access_flags_from_d3d12_barrier(list, barrier->SyncAfter, barrier->AccessAfter);
+    vk_transition.srcAccessMask = vk_access_flags_from_d3d12_barrier(list, barrier->SyncBefore,
+            barrier->AccessBefore, vk_transition.srcStageMask);
+    vk_transition.dstAccessMask = vk_access_flags_from_d3d12_barrier(list, barrier->SyncAfter,
+            barrier->AccessAfter, vk_transition.dstStageMask);
     vk_transition.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     vk_transition.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     vk_transition.image = resource->res.vk_image;

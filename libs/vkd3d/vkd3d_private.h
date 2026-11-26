@@ -1,7 +1,7 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
  * 2026-09-01, 2026-09-12, 2026-09-18, 2026-09-19, 2026-09-26,
- * 2026-10-03, 2026-10-10.
+ * 2026-10-03, 2026-10-10, 2026-11-27.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -4557,6 +4557,7 @@ enum vkd3d_bindless_flags
     VKD3D_BINDLESS_MUTABLE_EMBEDDED_PACKED_METADATA = (1u << 10),
     VKD3D_BINDLESS_MUTABLE_TYPE_SPLIT_RAW_TYPED     = (1u << 11),
     VKD3D_BINDLESS_HEAP                             = (1u << 12),
+    VKD3D_HEAP_COMPUTE_ROOT_CBV_BDA                 = (1u << 13),
 };
 
 #define VKD3D_BINDLESS_SET_MAX_EXTRA_BINDINGS 8
