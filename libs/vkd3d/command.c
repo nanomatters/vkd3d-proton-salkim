@@ -13814,6 +13814,13 @@ static void d3d12_command_list_merge_copy_tracking(struct d3d12_command_list *li
             d3d12_command_list_barrier_batch_add_global_transition(list, batch,
                    VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT, 0,
                    list->transfer_batch.read_after_write_hazard_stages, VK_ACCESS_2_SHADER_READ_BIT);
+            /* Image copies can consume this deferred barrier for their source.
+             * A destination overlap can also drain tracking before we check the source. */
+            if (list->transfer_batch.tracked_copy_texture_count)
+            {
+                batch->vk_memory_barrier.dstStageMask |= VK_PIPELINE_STAGE_2_COPY_BIT;
+                batch->vk_memory_barrier.dstAccessMask |= VK_ACCESS_2_TRANSFER_READ_BIT;
+            }
             list->transfer_batch.read_after_write_hazard_stages = 0;
         }
 

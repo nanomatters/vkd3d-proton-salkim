@@ -58,6 +58,7 @@ def main():
 #define VK_ACCESS_2_SHADER_READ_BIT 8
 #define VK_ACCESS_2_SHADER_WRITE_BIT 16
 #define VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT 32
+#define VK_ACCESS_2_TRANSFER_READ_BIT 64
 #define VK_ACCESS_2_NONE 0
 #define D3D12_RESOURCE_STATE_COPY_DEST 1
 #define D3D12_RESOURCE_STATE_COPY_SOURCE 2
@@ -575,6 +576,20 @@ int main(int argc, char **argv)
             assert(batch.vk_memory_barrier.dstStageMask & VK_PIPELINE_STAGE_2_CLEAR_BIT);
             assert(batch.vk_memory_barrier.dstStageMask & VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
             assert(batch.vk_memory_barrier.dstAccessMask & VK_ACCESS_2_SHADER_READ_BIT);
+        }
+        /* A deferred COPY_DEST -> shader resource transition can be drained
+         * by a copy that reads the tracked image. */
+        for (i = 0; i < 4; i++)
+        {
+            struct d3d12_command_list_barrier_batch batch = {0};
+            list.transfer_batch.tracked_copy_texture_count = i & 1;
+            list.transfer_batch.tracked_copy_buffer_count = !(i & 1);
+            list.transfer_batch.vk_stages = VK_PIPELINE_STAGE_2_COPY_BIT;
+            list.transfer_batch.read_after_write_hazard_stages = (i & 2) ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : 0;
+            d3d12_command_list_merge_copy_tracking(&list, &batch);
+            assert(batch.vk_memory_barrier.srcAccessMask & VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            assert(batch.vk_memory_barrier.dstStageMask & VK_PIPELINE_STAGE_2_COPY_BIT);
+            assert(!!(batch.vk_memory_barrier.dstAccessMask & VK_ACCESS_2_TRANSFER_READ_BIT) == (i == 3));
         }
     }
 
