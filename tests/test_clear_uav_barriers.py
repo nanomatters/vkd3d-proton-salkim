@@ -92,11 +92,13 @@ MOCKS = r'''
 #define D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL 2
 #define VKD3D_RESOURCE_COPY_QUEUE_COMPATIBLE 1
 #define VKD3D_RESOURCE_LINEAR_STAGING_COPY 2
+struct vkd3d_format { VkImageAspectFlags vk_aspect_mask; };
 struct d3d12_resource
 {
     bool texture;
     unsigned int flags;
-    struct { unsigned int Flags; } desc;
+    struct { unsigned int Flags, MipLevels, DepthOrArraySize; } desc;
+    const struct vkd3d_format *format;
     struct { VkImage vk_image; } res;
 };
 struct d3d12_device
@@ -129,6 +131,7 @@ struct d3d12_command_list_barrier_batch
 };
 #define d3d12_resource_is_buffer(r) (!(r)->texture)
 #define d3d12_resource_is_texture(r) ((r)->texture)
+#define d3d12_resource_desc_get_layer_count(d) ((d)->DepthOrArraySize)
 #define impl_from_ID3D12Resource(r) (r)
 #define d3d12_device_supports_unified_layouts(d) true
 #define d3d12_device_supports_ray_tracing_tier_1_0(d) false
@@ -180,7 +183,9 @@ static void run_case(unsigned int route, unsigned int scope, bool destination)
     struct d3d12_device device = {0};
     struct d3d12_command_list list = {.device = &device, .vk_queue_flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT};
     struct d3d12_command_list_barrier_batch batch = {0};
-    struct d3d12_resource resource = {.texture = route >= 2, .res.vk_image = (VkImage)(uintptr_t)1};
+    const struct vkd3d_format format = {VK_IMAGE_ASPECT_COLOR_BIT};
+    struct d3d12_resource resource = {.texture = route >= 2, .res.vk_image = (VkImage)(uintptr_t)1,
+        .format = &format, .desc = {.MipLevels = 1, .DepthOrArraySize = 1}};
     D3D12_GLOBAL_BARRIER global = {scopes[scope], D3D12_BARRIER_SYNC_COPY,
         D3D12_BARRIER_ACCESS_UNORDERED_ACCESS, D3D12_BARRIER_ACCESS_COPY_SOURCE};
     bool covers_clear = scope != 4;
@@ -241,6 +246,54 @@ static void run_case(unsigned int route, unsigned int scope, bool destination)
     cases++;
 }
 
+static void test_texture_clear_ranges(void)
+{
+    const struct vkd3d_format format = {VK_IMAGE_ASPECT_COLOR_BIT};
+    struct d3d12_resource image = {.texture = true, .res.vk_image = (VkImage)(uintptr_t)1,
+        .format = &format, .desc = {.MipLevels = 2, .DepthOrArraySize = 2}};
+    struct d3d12_resource other = image;
+    struct d3d12_device device = {0};
+    struct d3d12_command_list list = {.device = &device, .vk_queue_flags = VK_QUEUE_COMPUTE_BIT};
+    struct d3d12_command_list_barrier_batch batch = {0};
+    VkImageMemoryBarrier2 copy = {.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+            .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT, .image = image.res.vk_image};
+    static const VkImageSubresourceRange ranges[] = {
+        {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 2},
+        {VK_IMAGE_ASPECT_COLOR_BIT, 1, 1, 0, 2},
+        {VK_IMAGE_ASPECT_COLOR_BIT, 0, 2, 1, 1},
+        {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS},
+    };
+
+    other.res.vk_image = (VkImage)(uintptr_t)2;
+    d3d12_command_list_register_clear_uav_pending(&list.cmd.clear_uav, &image, true);
+    d3d12_command_list_register_clear_uav_pending(&list.cmd.clear_uav, &other, false);
+    for (unsigned int i = 0; i < ARRAY_SIZE(ranges); ++i)
+    {
+        copy.subresourceRange = ranges[i];
+        copy.srcStageMask = copy.srcAccessMask = 0;
+        d3d12_command_list_consume_clear_uav_barrier_batch(&list, &batch, &image, &copy);
+        assert(copy.srcStageMask == VK_PIPELINE_STAGE_2_CLEAR_BIT);
+        assert(copy.srcAccessMask == VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    }
+    assert(!list.cmd.clear_uav.has_clear_command && list.cmd.clear_uav.has_shader_command);
+    copy.image = other.res.vk_image;
+    copy.srcStageMask = copy.srcAccessMask = 0;
+    d3d12_command_list_consume_clear_uav_barrier_batch(&list, &batch, &other, &copy);
+    assert(copy.srcStageMask == VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+    assert(copy.srcAccessMask == VK_ACCESS_2_SHADER_WRITE_BIT);
+    assert(!d3d12_command_list_clear_uav_pending(&list));
+
+    /* A buffer clear puts tracking in global mode. A texture transition
+     * still needs to cover its own copy and cannot retire the buffer. */
+    d3d12_command_list_register_clear_uav_pending(&list.cmd.clear_uav, NULL, true);
+    d3d12_command_list_register_clear_uav_pending(&list.cmd.clear_uav, &other, true);
+    copy.srcStageMask = copy.srcAccessMask = 0;
+    d3d12_command_list_consume_clear_uav_barrier_batch(&list, &batch, &other, &copy);
+    assert(copy.srcStageMask == VK_PIPELINE_STAGE_2_CLEAR_BIT);
+    assert(copy.srcAccessMask == VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    assert(d3d12_command_list_clear_uav_pending(&list));
+}
+
 static void test_constant_buffer_access(void)
 {
     const D3D12_BARRIER_ACCESS cbv = D3D12_BARRIER_ACCESS_CONSTANT_BUFFER;
@@ -266,6 +319,7 @@ static void test_constant_buffer_access(void)
 
 int main(void)
 {
+    test_texture_clear_ranges();
     test_constant_buffer_access();
     for (unsigned int route = 0; route < 4; route++)
         for (unsigned int scope = 0; scope < 5; scope++)

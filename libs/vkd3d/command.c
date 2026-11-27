@@ -16186,67 +16186,68 @@ void d3d12_command_list_consume_clear_uav_barrier_batch(struct d3d12_command_lis
         struct d3d12_resource *resource, VkImageMemoryBarrier2 *vk_resource_barrier)
 {
     struct d3d12_command_list_clear_uav_tracking *clear_uav = &list->cmd.clear_uav;
-    VkImageMemoryBarrier2 vk_image_barrier;
-    VkPipelineStageFlags2 shader_stages;
+    const VkImageSubresourceRange *range;
+    bool clear_command, shader_command;
     unsigned int i;
 
     if (!d3d12_command_list_clear_uav_pending(list))
         return;
 
-    shader_stages = vk_queue_shader_stages(list->device, list->vk_queue_flags);
-
-    /* A global barrier must make the clear visible to its own destination,
-     * including transfer reads. */
-    if (!resource || clear_uav->has_global_barrier)
+    if (!vk_resource_barrier)
     {
-        d3d12_command_list_consume_clear_uav_global_barrier(clear_uav, &batch->vk_memory_barrier, shader_stages);
+        /* Buffer transitions also use a global memory barrier. If we are
+         * tracking only textures, leave them for their own transitions. */
+        if (!resource || clear_uav->has_global_barrier)
+            d3d12_command_list_consume_clear_uav_global_barrier(clear_uav, &batch->vk_memory_barrier,
+                    vk_queue_shader_stages(list->device, list->vk_queue_flags));
+        return;
+    }
+
+    if (clear_uav->has_global_barrier)
+    {
+        /* The image may be among the untracked clears. Its transition
+         * cannot consume pending clears on the other resources. */
+        clear_command = clear_uav->has_clear_command;
+        shader_command = clear_uav->has_shader_command;
     }
     else
     {
-        memset(&vk_image_barrier, 0, sizeof(vk_image_barrier));
-        vk_image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        vk_image_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        vk_image_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        vk_image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        vk_image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        vk_image_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        vk_image_barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
-        vk_image_barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
-        vk_image_barrier.dstStageMask = shader_stages;
-        vk_image_barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
-
         for (i = 0; i < clear_uav->num_pending_image_clears; i++)
+            if (clear_uav->pending_clears[i].resource == resource)
+                break;
+        if (i == clear_uav->num_pending_image_clears)
+            return;
+
+        clear_command = clear_uav->pending_clears[i].clear_command;
+        shader_command = clear_uav->pending_clears[i].shader_command;
+
+        /* We track images, so only a transition of the whole image can
+         * retire the entry. Another mip or layer may still need it. */
+        range = &vk_resource_barrier->subresourceRange;
+        if (!range->baseMipLevel && range->levelCount >= resource->desc.MipLevels &&
+                !range->baseArrayLayer && range->layerCount >= d3d12_resource_desc_get_layer_count(&resource->desc) &&
+                range->aspectMask == resource->format->vk_aspect_mask)
         {
-            bool shader_command = clear_uav->pending_clears[i].shader_command;
-            bool clear_command = clear_uav->pending_clears[i].clear_command;
-            VkPipelineStageFlags2 src_stages;
-            VkAccessFlags2 src_access;
-
-            assert(d3d12_resource_is_texture(clear_uav->pending_clears[i].resource));
-
-            src_stages = (clear_command ? VK_PIPELINE_STAGE_2_CLEAR_BIT : 0) |
-                    (shader_command ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : 0);
-            src_access = (clear_command ? VK_ACCESS_2_TRANSFER_WRITE_BIT : 0) |
-                    (shader_command ? VK_ACCESS_2_SHADER_WRITE_BIT : 0);
-
-            if (clear_uav->pending_clears[i].resource != resource)
+            clear_uav->pending_clears[i] = clear_uav->pending_clears[--clear_uav->num_pending_image_clears];
+            clear_uav->has_clear_command = false;
+            clear_uav->has_shader_command = false;
+            for (i = 0; i < clear_uav->num_pending_image_clears; i++)
             {
-                vk_image_barrier.image = clear_uav->pending_clears[i].resource->res.vk_image;
-                vk_image_barrier.srcStageMask = src_stages;
-                vk_image_barrier.srcAccessMask = src_access;
-                d3d12_command_list_barrier_batch_add_layout_transition(list, batch, &vk_image_barrier);
-            }
-            else if (vk_resource_barrier)
-            {
-                vk_resource_barrier->srcStageMask |= src_stages;
-                vk_resource_barrier->srcAccessMask |= src_access;
+                clear_uav->has_clear_command |= clear_uav->pending_clears[i].clear_command;
+                clear_uav->has_shader_command |= clear_uav->pending_clears[i].shader_command;
             }
         }
+    }
 
-        clear_uav->num_pending_image_clears = 0;
-        clear_uav->has_global_barrier = false;
-        clear_uav->has_clear_command = false;
-        clear_uav->has_shader_command = false;
+    if (clear_command)
+    {
+        vk_resource_barrier->srcStageMask |= VK_PIPELINE_STAGE_2_CLEAR_BIT;
+        vk_resource_barrier->srcAccessMask |= VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    }
+    if (shader_command)
+    {
+        vk_resource_barrier->srcStageMask |= VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        vk_resource_barrier->srcAccessMask |= VK_ACCESS_2_SHADER_WRITE_BIT;
     }
 }
 
