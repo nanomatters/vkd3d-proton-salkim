@@ -1987,9 +1987,6 @@ static HRESULT d3d12_state_object_compile_pipeline_variant(struct d3d12_rt_state
     variant->local_static_sampler.set_index = compat_global_signature ?
             compat_global_signature->raygen.num_set_layouts : 0;
 
-    if (object->device->debug_ring.active)
-        data->spec_info_buffer = vkd3d_calloc(data->entry_points_count, sizeof(*data->spec_info_buffer));
-
     global_rt_create_flags = vkd3d_atomic_uint64_load_explicit(
             &object->device->vendor_hacks.global_ray_tracing_pipeline_create_flags,
             vkd3d_memory_order_relaxed);
@@ -2739,6 +2736,9 @@ static HRESULT d3d12_state_object_init(struct d3d12_rt_state_object *object,
     /* Figure out how many variants we need. We'll need one pipeline variant
      * for every unique global root signature. */
     d3d12_state_object_collect_variants(object, &data);
+
+    if (device->debug_ring.active && data.entry_points_count)
+        data.spec_info_buffer = vkd3d_calloc(data.entry_points_count, sizeof(*data.spec_info_buffer));
 
     for (i = 0; i < object->pipelines_count; i++)
     {
