@@ -180,7 +180,7 @@ static void run_case(unsigned int route, unsigned int scope, bool destination)
     struct d3d12_device device = {0};
     struct d3d12_command_list list = {.device = &device, .vk_queue_flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT};
     struct d3d12_command_list_barrier_batch batch = {0};
-    struct d3d12_resource resource = {.texture = route == 2, .res.vk_image = (VkImage)(uintptr_t)1};
+    struct d3d12_resource resource = {.texture = route >= 2, .res.vk_image = (VkImage)(uintptr_t)1};
     D3D12_GLOBAL_BARRIER global = {scopes[scope], D3D12_BARRIER_SYNC_COPY,
         D3D12_BARRIER_ACCESS_UNORDERED_ACCESS, D3D12_BARRIER_ACCESS_COPY_SOURCE};
     bool covers_clear = scope != 4;
@@ -201,7 +201,8 @@ static void run_case(unsigned int route, unsigned int scope, bool destination)
         CHECK(d3d12_command_list_clear_uav_pending(&list));
     }
 
-    if (route == 0)
+    /* Routes 0 and 3 issue a global barrier after a buffer or texture clear. */
+    if (route == 0 || route == 3)
         d3d12_command_list_process_enhanced_barrier_global(&list, &batch, &global);
     else if (route == 1)
     {
@@ -266,7 +267,7 @@ static void test_constant_buffer_access(void)
 int main(void)
 {
     test_constant_buffer_access();
-    for (unsigned int route = 0; route < 3; route++)
+    for (unsigned int route = 0; route < 4; route++)
         for (unsigned int scope = 0; scope < 5; scope++)
             for (unsigned int destination = 0; destination < 2; destination++)
                 run_case(route, scope, destination);

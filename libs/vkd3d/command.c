@@ -16195,7 +16195,9 @@ void d3d12_command_list_consume_clear_uav_barrier_batch(struct d3d12_command_lis
 
     shader_stages = vk_queue_shader_stages(list->device, list->vk_queue_flags);
 
-    if (clear_uav->has_global_barrier)
+    /* A global barrier must make the clear visible to its own destination,
+     * including transfer reads. */
+    if (!resource || clear_uav->has_global_barrier)
     {
         d3d12_command_list_consume_clear_uav_global_barrier(clear_uav, &batch->vk_memory_barrier, shader_stages);
     }
