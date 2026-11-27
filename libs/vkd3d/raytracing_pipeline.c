@@ -1,4 +1,6 @@
 /*
+ * Salkim modifications by Erhan Bilgili on 2026-11-28.
+ *
  * Copyright 2021 Hans-Kristian Arntzen for Valve Corporation
  *
  * This library is free software; you can redistribute it and/or
@@ -2164,31 +2166,31 @@ static HRESULT d3d12_state_object_compile_pipeline_variant(struct d3d12_rt_state
 
         if (d3d12_device_use_descriptor_heap(object->device))
         {
-            /* Need mapping structs. This is rather rare, so don't refactor a bunch of stuff
-             * to support inline append these mappings. */
-            struct d3d12_root_signature *empty_rs = NULL;
-            if (!per_entry_global_signature && local_signature)
-                if (FAILED(d3d12_root_signature_create_empty(object->device, &empty_rs)))
-                    return E_OUTOFMEMORY;
-
             if (local_signature)
             {
-                /* Need a fused mapping table. */
-                struct vkd3d_fused_root_signature_mappings *fused =
-                        d3d12_state_object_fuse_root_signature_mappings(
-                            empty_rs ? empty_rs : per_entry_global_signature, local_signature);
-                vk_prepend_struct(stage, &fused->mapping_info);
-                vkd3d_array_reserve((void **)&data->scratch_allocs, &data->scratch_allocs_size,
-                    data->scratch_allocs_count + 1, sizeof(*data->scratch_allocs));
+                struct vkd3d_fused_root_signature_mappings *fused;
+                struct d3d12_root_signature *empty_rs = NULL;
+
+                if (!vkd3d_array_reserve((void **)&data->scratch_allocs, &data->scratch_allocs_size,
+                        data->scratch_allocs_count + 1, sizeof(*data->scratch_allocs)))
+                    return E_OUTOFMEMORY;
+                if (!per_entry_global_signature && FAILED(d3d12_root_signature_create_empty(object->device, &empty_rs)))
+                    return E_OUTOFMEMORY;
+
+                fused = d3d12_state_object_fuse_root_signature_mappings(
+                        empty_rs ? empty_rs : per_entry_global_signature, local_signature);
+                if (empty_rs)
+                    ID3D12RootSignature_Release(&empty_rs->ID3D12RootSignature_iface);
+                if (!fused)
+                    return E_OUTOFMEMORY;
+
                 data->scratch_allocs[data->scratch_allocs_count++] = fused;
+                vk_prepend_struct(stage, &fused->mapping_info);
             }
             else if (per_entry_global_signature)
             {
                 stage->pNext = &per_entry_global_signature->heap.mapping_info;
             }
-
-            if (empty_rs)
-                ID3D12RootSignature_Release(&empty_rs->ID3D12RootSignature_iface);
         }
 
         memset(&dxil, 0, sizeof(dxil));

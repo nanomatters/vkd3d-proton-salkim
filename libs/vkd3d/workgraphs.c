@@ -1,4 +1,6 @@
 /*
+ * Salkim modifications by Erhan Bilgili on 2026-11-28.
+ *
  * Copyright 2024 Hans-Kristian Arntzen for Valve Corporation
  *
  * This library is free software; you can redistribute it and/or
@@ -2277,15 +2279,12 @@ static HRESULT d3d12_wg_state_object_convert_entry_point(
     /* Just fallback to normal heap descriptor if needed. */
     shader_interface_info.flags &= ~VKD3D_SHADER_INTERFACE_INLINE_REDZONE_CBV;
 
-    if (module->root_signature)
+    if (module->root_signature || local_rs_assoc)
     {
         module->mappings = d3d12_state_object_build_workgraph_root_signature_mappings(module->root_signature,
-            local_rs_assoc ? local_rs_assoc->root_signature : NULL);
-    }
-    else if (local_rs_assoc)
-    {
-        module->mappings = d3d12_state_object_build_workgraph_root_signature_mappings(NULL,
-            local_rs_assoc->root_signature);
+                local_rs_assoc ? local_rs_assoc->root_signature : NULL);
+        if (!module->mappings)
+            return E_OUTOFMEMORY;
     }
     else
     {

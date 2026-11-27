@@ -1,4 +1,6 @@
 /*
+ * Salkim modifications by Erhan Bilgili on 2026-11-28.
+ *
  * Copyright 2024 Hans-Kristian Arntzen for Valve Corporation
  *
  * This library is free software; you can redistribute it and/or
@@ -220,22 +222,23 @@ const struct d3d12_state_object_association *d3d12_state_object_find_association
 struct vkd3d_fused_root_signature_mappings *d3d12_state_object_fuse_root_signature_mappings(
     struct d3d12_root_signature *global, struct d3d12_root_signature *local)
 {
-    /* Need a fused mapping table. */
-    uint32_t num_mappings = global->heap.mapping_info.mappingCount + local->heap.mapping_info.mappingCount;
+    uint32_t global_count = global ? global->heap.mapping_info.mappingCount : 0;
+    uint32_t local_count = local ? local->heap.mapping_info.mappingCount : 0;
     struct vkd3d_fused_root_signature_mappings *fused;
 
     fused = vkd3d_calloc(1, offsetof(struct vkd3d_fused_root_signature_mappings, mappings) +
-            num_mappings * sizeof(VkDescriptorSetAndBindingMappingEXT));
+            (global_count + local_count) * sizeof(*fused->mappings));
+    if (!fused)
+        return NULL;
+
     fused->mapping_info.sType = VK_STRUCTURE_TYPE_SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT;
-    fused->mapping_info.mappingCount = num_mappings;
+    fused->mapping_info.mappingCount = global_count + local_count;
     fused->mapping_info.pMappings = fused->mappings;
 
-    memcpy(fused->mappings, global->heap.mapping_info.pMappings,
-            global->heap.mapping_info.mappingCount * sizeof(*fused->mappings));
-
-    memcpy(fused->mappings + global->heap.mapping_info.mappingCount,
-            local->heap.mapping_info.pMappings,
-            local->heap.mapping_info.mappingCount * sizeof(*fused->mappings));
+    if (global_count)
+        memcpy(fused->mappings, global->heap.mapping_info.pMappings, global_count * sizeof(*fused->mappings));
+    if (local_count)
+        memcpy(fused->mappings + global_count, local->heap.mapping_info.pMappings, local_count * sizeof(*fused->mappings));
 
     return fused;
 }
@@ -244,36 +247,13 @@ struct vkd3d_fused_root_signature_mappings *d3d12_state_object_build_workgraph_r
         struct d3d12_root_signature *global, struct d3d12_root_signature *local)
 {
     struct vkd3d_fused_root_signature_mappings *fused;
-    uint32_t num_mappings = 0;
     uint32_t i;
 
-    if (global)
-        num_mappings += global->heap.mapping_info.mappingCount;
-    if (local)
-        num_mappings += local->heap.mapping_info.mappingCount;
-
-    fused = vkd3d_calloc(1, offsetof(struct vkd3d_fused_root_signature_mappings, mappings) +
-            num_mappings * sizeof(VkDescriptorSetAndBindingMappingEXT));
-    fused->mapping_info.sType = VK_STRUCTURE_TYPE_SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT;
-    fused->mapping_info.mappingCount = num_mappings;
-    fused->mapping_info.pMappings = fused->mappings;
-
-    if (global)
-    {
-        memcpy(fused->mappings,
-                global->heap.mapping_info.pMappings,
-                global->heap.mapping_info.mappingCount * sizeof(*fused->mappings));
-    }
-
-    if (local)
-    {
-        memcpy(fused->mappings + (global ? global->heap.mapping_info.mappingCount : 0),
-                local->heap.mapping_info.pMappings,
-                local->heap.mapping_info.mappingCount * sizeof(*fused->mappings));
-    }
+    if (!(fused = d3d12_state_object_fuse_root_signature_mappings(global, local)))
+        return NULL;
 
     /* Reroute to INDIRECT tokens instead. Gotta love how flexible this is :3 */
-    for (i = 0; i < num_mappings; i++)
+    for (i = 0; i < fused->mapping_info.mappingCount; i++)
     {
         VkDescriptorSetAndBindingMappingEXT tmp = fused->mappings[i];
         switch (tmp.source)
