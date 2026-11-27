@@ -30,9 +30,15 @@ def block(source, marker, declaration=False):
     return source[start:end]
 
 
-def generate(source):
-    idl = (ROOT / "include/vkd3d_d3d12.idl").read_text()
-    header = (ROOT / "libs/vkd3d/vkd3d_private.h").read_text()
+def read_repo_file(path, revision):
+    if revision:
+        return subprocess.check_output(["git", "show", f"{revision}:{path}"], cwd=ROOT, text=True)
+    return (ROOT / path).read_text()
+
+
+def generate(source, revision=None):
+    idl = read_repo_file("include/vkd3d_d3d12.idl", revision)
+    header = read_repo_file("libs/vkd3d/vkd3d_private.h", revision)
     pieces = [PREFIX]
     for kind, names in (("enum", ("D3D12_BARRIER_LAYOUT", "D3D12_BARRIER_SYNC", "D3D12_BARRIER_ACCESS",
                                  "D3D12_TEXTURE_BARRIER_FLAGS")),
@@ -42,6 +48,7 @@ def generate(source):
     pieces.append(block(header, "struct d3d12_command_list_clear_uav_tracking\n", True))
     pieces.append(block(header, "enum vkd3d_bindless_flags\n", True))
     pieces.append(MOCKS)
+    pieces.append(block(header, "static inline bool d3d12_command_list_clear_uav_pending("))
     for prefix, name in (
         ("void ", "d3d12_command_list_register_clear_uav_pending"),
         ("void ", "d3d12_command_list_consume_clear_uav_global_barrier"),
@@ -191,6 +198,7 @@ static void run_case(unsigned int route, unsigned int scope, bool destination)
     {
         /* Use the same registration as native vkCmdFillBuffer/vkCmdClearColorImage. */
         d3d12_command_list_register_clear_uav_pending(&list.cmd.clear_uav, &resource, true);
+        CHECK(d3d12_command_list_clear_uav_pending(&list));
     }
 
     if (route == 0)
@@ -225,7 +233,7 @@ static void run_case(unsigned int route, unsigned int scope, bool destination)
         CHECK(!!(stages & VK_PIPELINE_STAGE_2_CLEAR_BIT) == covers_clear);
         CHECK(!!(access & VK_ACCESS_2_TRANSFER_WRITE_BIT) == covers_clear);
         CHECK(list.cmd.clear_uav.has_clear_command == !covers_clear);
-        CHECK(!!(list.cmd.clear_uav.has_global_barrier || list.cmd.clear_uav.num_pending_image_clears) == !covers_clear);
+        CHECK(d3d12_command_list_clear_uav_pending(&list) == !covers_clear);
         access = route == 2 ? batch.images[0].dstAccessMask : batch.vk_memory_barrier.dstAccessMask;
         CHECK(access & VK_ACCESS_2_TRANSFER_READ_BIT);
     }
@@ -271,15 +279,14 @@ int main(void)
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=ROOT / "libs/vkd3d/command.c")
-    parser.add_argument("--revision", help="read command.c from a git revision for a negative control")
+    parser.add_argument("--revision", help="read sources from a git revision for a negative control")
     parser.add_argument("--generate", type=Path)
     parser.add_argument("--build-dir", type=Path)
     args = parser.parse_args()
     if not args.generate and not args.build_dir:
         parser.error("either --generate or --build-dir is required")
-    source = subprocess.check_output(["git", "show", args.revision + ":libs/vkd3d/command.c"], cwd=ROOT,
-                                     text=True) if args.revision else args.source.read_text()
-    harness = generate(source)
+    source = read_repo_file("libs/vkd3d/command.c", args.revision) if args.revision else args.source.read_text()
+    harness = generate(source, args.revision)
     if args.generate:
         args.generate.write_text(harness)
         return

@@ -1,7 +1,7 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
  * 2026-09-11, 2026-09-12, 2026-09-18, 2026-09-26, 2026-09-29,
- * 2026-10-10, 2026-11-27.
+ * 2026-10-10, 2026-11-27, 2026-11-28.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -16190,7 +16190,7 @@ void d3d12_command_list_consume_clear_uav_barrier_batch(struct d3d12_command_lis
     VkPipelineStageFlags2 shader_stages;
     unsigned int i;
 
-    if (clear_uav->num_pending_image_clears == 0 && !clear_uav->has_global_barrier)
+    if (!d3d12_command_list_clear_uav_pending(list))
         return;
 
     shader_stages = vk_queue_shader_stages(list->device, list->vk_queue_flags);

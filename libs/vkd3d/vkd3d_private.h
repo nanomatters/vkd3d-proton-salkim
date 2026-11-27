@@ -1,7 +1,7 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
  * 2026-09-01, 2026-09-12, 2026-09-18, 2026-09-19, 2026-09-26,
- * 2026-10-03, 2026-10-10, 2026-11-27.
+ * 2026-10-03, 2026-10-10, 2026-11-27, 2026-11-28.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -3651,7 +3651,7 @@ void d3d12_command_list_register_clear_uav_pending(
 
 static inline bool d3d12_command_list_clear_uav_pending(struct d3d12_command_list *list)
 {
-    return list->cmd.clear_uav.num_pending_image_clears != 0;
+    return list->cmd.clear_uav.num_pending_image_clears != 0 || list->cmd.clear_uav.has_global_barrier;
 }
 
 #define VKD3D_DESCRIPTOR_HEAP_META_PUSH_DATA_OFFSET 64
