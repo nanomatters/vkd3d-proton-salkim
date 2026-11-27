@@ -1,5 +1,5 @@
 /*
- * Salkim modifications by Erhan Bilgili on 2026-09-29 and 2026-10-03.
+ * Salkim modifications by Erhan Bilgili on 2026-09-29, 2026-10-03 and 2026-11-28.
  * Modification notice added on 2026-10-10.
  *
  * Copyright 2016-2017 Józef Kucia for CodeWeavers
@@ -42,7 +42,8 @@ void test_raytracing_lss_shader_opcode_support(void)
         PIPELINE = 1u << 2,
         QUERY = 1u << 3,
         SER = 1u << 4,
-        ANY_GEOMETRY = 1u << 5,
+        POSITION_FETCH = 1u << 5,
+        ANY_GEOMETRY = 1u << 6,
     };
     static const struct
     {
@@ -50,6 +51,9 @@ void test_raytracing_lss_shader_opcode_support(void)
     }
     tests[] =
     {
+        {NV_EXTN_OP_RT_TRIANGLE_OBJECT_POSITIONS, POSITION_FETCH | PIPELINE},
+        {NV_EXTN_OP_RT_CANDIDATE_TRIANGLE_OBJECT_POSITIONS, POSITION_FETCH | QUERY},
+        {NV_EXTN_OP_RT_COMMITTED_TRIANGLE_OBJECT_POSITIONS, POSITION_FETCH | QUERY},
         {NV_EXTN_OP_RT_SPHERE_OBJECT_POSITION_AND_RADIUS, SPHERES | PIPELINE},
         {NV_EXTN_OP_RT_CANDIDATE_SPHERE_OBJECT_POSITION_AND_RADIUS, SPHERES | QUERY},
         {NV_EXTN_OP_RT_COMMITTED_SPHERE_OBJECT_POSITION_AND_RADIUS, SPHERES | QUERY},
@@ -72,6 +76,7 @@ void test_raytracing_lss_shader_opcode_support(void)
         {NV_EXTN_OP_RT_COMMIT_NONOPAQUE_BUILTIN_PRIMITIVE_HIT, ANY_GEOMETRY | QUERY},
     };
     VkPhysicalDeviceRayTracingLinearSweptSpheresFeaturesNV lss;
+    VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR positions = {0};
     VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV ser;
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR pipeline;
     VkPhysicalDeviceRayQueryFeaturesKHR query;
@@ -100,9 +105,11 @@ void test_raytracing_lss_shader_opcode_support(void)
     pipeline.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
     query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
     ser.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV;
+    positions.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR;
     lss.pNext = &pipeline;
     pipeline.pNext = &query;
     query.pNext = &ser;
+    ser.pNext = &positions;
 
     if (!get_driver_vk_features(context.device, &lss))
     {
@@ -129,6 +136,9 @@ void test_raytracing_lss_shader_opcode_support(void)
     if (ser.rayTracingInvocationReorder &&
             is_vk_device_extension_supported(context.device, VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME))
         supported |= SER;
+    if (positions.rayTracingPositionFetch &&
+            is_vk_device_extension_supported(context.device, VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME))
+        supported |= POSITION_FETCH;
     if (supported & (SPHERES | LSS))
         supported |= ANY_GEOMETRY;
 

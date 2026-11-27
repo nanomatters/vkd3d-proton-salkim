@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Salkim modifications by Erhan Bilgili on 2026-11-17.
+# Salkim modifications by Erhan Bilgili on 2026-11-17 and 2026-11-28.
 
 """Exercise production NVAPI opcode reporting across every feature combination.
 
@@ -90,6 +90,7 @@ MAIN = r"""
             device.device_info.ray_tracing_linear_swept_spheres_features_nv.linearSweptSpheres = !!(features & LSS);
             device.device_info.ray_tracing_pipeline_features.rayTracingPipeline = !!(features & PIPELINE);
             device.device_info.ray_query_features.rayQuery = !!(features & QUERY);
+            device.device_info.ray_tracing_position_fetch_features.rayTracingPositionFetch = !!(features & POSITION_FETCH);
             device.device_info.ray_tracing_invocation_reorder_features_nv.rayTracingInvocationReorder = !!(features & SER);
             supported = features;
             if (features & (SPHERES | LSS))
@@ -116,7 +117,8 @@ MAIN = r"""
             checks++;
         }
     }
-    printf("NVAPI shader opcodes: %u checks passed across 64 feature/initialization combinations\n", checks);
+    printf("NVAPI shader opcodes: %u checks passed across %u feature/initialization combinations\n",
+            checks, 2u * ANY_GEOMETRY);
     return 0;
 }
 """

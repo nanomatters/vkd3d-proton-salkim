@@ -1,6 +1,6 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-01, 2026-09-19, 2026-10-03, 2026-10-04.
+ * 2026-09-01, 2026-09-19, 2026-10-03, 2026-10-04, 2026-11-28.
  * Modification notice added on 2026-09-28.
  *
  * * Copyright 2021 NVIDIA Corporation
@@ -770,9 +770,13 @@ static BOOL STDMETHODCALLTYPE d3d12_device_vkd3d_ext_IsNvShaderExtnOpCodeSupport
             return ser_features->rayTracingInvocationReorder ? TRUE : FALSE;
 
         case NV_EXTN_OP_RT_TRIANGLE_OBJECT_POSITIONS:
+            return device->device_info.ray_tracing_position_fetch_features.rayTracingPositionFetch &&
+                    device->device_info.ray_tracing_pipeline_features.rayTracingPipeline;
+
         case NV_EXTN_OP_RT_CANDIDATE_TRIANGLE_OBJECT_POSITIONS:
         case NV_EXTN_OP_RT_COMMITTED_TRIANGLE_OBJECT_POSITIONS:
-            return device->device_info.ray_tracing_position_fetch_features.rayTracingPositionFetch ? TRUE : FALSE;
+            return device->device_info.ray_tracing_position_fetch_features.rayTracingPositionFetch &&
+                    device->device_info.ray_query_features.rayQuery;
 
         case NV_EXTN_OP_RT_SPHERE_OBJECT_POSITION_AND_RADIUS:
         case NV_EXTN_OP_RT_IS_SPHERE_HIT:
