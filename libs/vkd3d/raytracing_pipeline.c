@@ -2011,6 +2011,13 @@ static HRESULT d3d12_state_object_compile_pipeline_variant(struct d3d12_rt_state
         if (!d3d12_root_signature_is_layout_compatible(variant->global_root_signature, per_entry_global_signature))
             continue;
 
+        if (!vkd3d_array_reserve((void **)&data->stages, &data->stages_size,
+                data->stages_count + 1, sizeof(*data->stages)))
+        {
+            vkd3d_free(local_static_sampler_bindings);
+            return E_OUTOFMEMORY;
+        }
+
         RT_TRACE("Compiling entry point: %s (stage = #%x).\n", debugstr_w(entry->plain_entry_point), entry->stage);
 
         local_signature = d3d12_state_object_pipeline_data_get_root_signature(
@@ -2150,8 +2157,6 @@ static HRESULT d3d12_state_object_compile_pipeline_variant(struct d3d12_rt_state
         entry->pipeline_variant_index = pipeline_variant_index;
         entry->stage_index = data->stages_count;
 
-        vkd3d_array_reserve((void **)&data->stages, &data->stages_size,
-                data->stages_count + 1, sizeof(*data->stages));
         stage = &data->stages[data->stages_count];
         stage->sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stage->pNext = NULL;
