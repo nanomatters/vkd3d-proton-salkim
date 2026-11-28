@@ -1,6 +1,6 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
- * 2026-09-26, 2026-10-03, 2026-11-27.
+ * 2026-09-26, 2026-10-03, 2026-11-27, 2026-11-28.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2017-2019 Józef Kucia for CodeWeavers
@@ -93,6 +93,7 @@ typedef uint64_t vkd3d_shader_hash_t;
 #define VKD3D_SHADER_META_FLAG_EXPORTS_VIEWPORT_INDEX (1ull << 30)
 /* Bit 31 is vacant. Intentional to test that 64-bits are plumbed through. */
 #define VKD3D_SHADER_META_FLAG_USES_RAY_QUERY (1ull << 32)
+#define VKD3D_SHADER_META_FLAG_USES_RAY_TRACING_POSITION_FETCH (1ull << 33)
 
 typedef uint64_t vkd3d_shader_meta_flags_t;
 

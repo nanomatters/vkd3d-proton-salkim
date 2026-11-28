@@ -1,4 +1,6 @@
 /*
+ * Salkim modifications by Erhan Bilgili on 2026-11-28.
+ *
  * Copyright 2017 Józef Kucia for CodeWeavers
  *
  * This library is free software; you can redistribute it and/or
@@ -869,6 +871,15 @@ void vkd3d_shader_extract_feature_meta(struct vkd3d_shader_code *code)
 
                 case SpvCapabilityRayQueryKHR:
                     meta |= VKD3D_SHADER_META_FLAG_USES_RAY_QUERY;
+                    break;
+
+                case SpvCapabilityRayQueryPositionFetchKHR:
+                    meta |= VKD3D_SHADER_META_FLAG_USES_RAY_QUERY |
+                            VKD3D_SHADER_META_FLAG_USES_RAY_TRACING_POSITION_FETCH;
+                    break;
+
+                case SpvCapabilityRayTracingPositionFetchKHR:
+                    meta |= VKD3D_SHADER_META_FLAG_USES_RAY_TRACING_POSITION_FETCH;
                     break;
 
                 default:

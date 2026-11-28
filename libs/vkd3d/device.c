@@ -1,7 +1,7 @@
 /*
  * Salkim modifications by Erhan Bilgili on:
  * 2026-09-11, 2026-09-26, 2026-09-30, 2026-10-03, 2026-10-14, 2026-10-30,
- * 2026-11-03.
+ * 2026-11-03, 2026-11-28.
  * Modification notice added on 2026-09-28.
  *
  * Copyright 2016 Józef Kucia for CodeWeavers
@@ -10999,6 +10999,13 @@ bool d3d12_device_validate_shader_meta(struct d3d12_device *device, const struct
             ERR("Missing sufficient features to expose WMMA FP8.\n");
             return false;
         }
+    }
+
+    if ((meta->flags & VKD3D_SHADER_META_FLAG_USES_RAY_TRACING_POSITION_FETCH) &&
+            !device->device_info.ray_tracing_position_fetch_features.rayTracingPositionFetch)
+    {
+        WARN("Shader %016"PRIx64" requires unsupported ray-tracing position fetch.\n", meta->hash);
+        return false;
     }
 
     if (meta->flags & VKD3D_SHADER_META_FLAG_USES_RAY_QUERY)
