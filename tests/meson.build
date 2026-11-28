@@ -1,5 +1,6 @@
 # Salkim modifications by Erhan Bilgili on:
-# 2026-09-01, 2026-09-29, 2026-10-04, 2026-10-10, 2026-10-14, 2026-10-30 and 2026-11-03.
+# 2026-09-01, 2026-09-29, 2026-10-04, 2026-10-10, 2026-10-14, 2026-10-30,
+# 2026-11-03 and 2026-11-28.
 
 extension_lookup_source = custom_target('extension-lookup-source',
   input : [ 'test_extension_lookup.py', '../libs/vkd3d/device.c',
@@ -137,7 +138,8 @@ queue_selection_test = executable('queue-selection', queue_selection_source,
 test('queue-selection', queue_selection_test, timeout : 15)
 
 memory_allocation_source = custom_target('memory-allocation-source',
-  input : [ 'test_memory_allocation.py', '../libs/vkd3d/memory.c' ],
+  input : [ 'test_memory_allocation.py', '../libs/vkd3d/memory.c', '../libs/vkd3d/vkd3d_private.h',
+            '../include/private/vkd3d_common.h', '../libs/vkd3d-common/memory.c' ],
   output : 'memory_allocation.c',
   command : [ find_program('python3', 'python', native : true), '@INPUT0@', '--generate', '@OUTPUT@' ])
 memory_allocation_test = executable('memory-allocation', memory_allocation_source,
@@ -145,7 +147,7 @@ memory_allocation_test = executable('memory-allocation', memory_allocation_sourc
   dependencies : dependency('threads', native : true),
   c_args : dgc_test_args,
   install : false)
-foreach allocation_case : [ 'locking', 'candidates' ]
+foreach allocation_case : [ 'locking', 'candidates', 'placement' ]
   test('memory-allocation-' + allocation_case, memory_allocation_test,
     args : [ allocation_case ], timeout : 10)
 endforeach

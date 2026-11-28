@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright 2026 Erhan Bilgili
 # SPDX-License-Identifier: LGPL-2.1-or-later
-"""Exercise production allocation policy and mutex ownership without a GPU."""
+"""Exercise memory budgeting, memory type selection and heap placement without a GPU."""
 
 import argparse
 import os
@@ -21,8 +21,14 @@ def extract_function(source, name):
     return source[start:end]
 
 
+def extract_struct(source, name):
+    start = source.index("struct " + name + "\n{")
+    return source[start:source.index("\n};", start) + 3]
+
+
 PREAMBLE = r'''
 #define _POSIX_C_SOURCE 200809L
+#include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
@@ -56,6 +62,11 @@ typedef int VkResult;
 #define TYPE_REBAR_CACHED (1u << 3)
 #define TYPES_REBAR (TYPE_REBAR | TYPE_REBAR_CACHED)
 #define TYPES_ALL (TYPE_DEVICE | TYPE_SYSTEM | TYPES_REBAR)
+#define D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT (4u * 1024 * 1024)
+#define max(a, b) ((a) > (b) ? (a) : (b))
+#define vkd3d_realloc realloc
+#define void_ptr_offset(ptr, offset) ((char *)(ptr) + (offset))
+typedef struct { VkDeviceSize size, alignment; } VkMemoryRequirements;
 #define VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO 1
 #define VK_OBJECT_TYPE_DEVICE_MEMORY 1
 #define VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_VK_ALLOCATE_MEMORY 1
@@ -111,6 +122,13 @@ struct vkd3d_device_memory_allocation
 {
     uint64_t vk_memory, size;
     uint32_t vk_memory_type;
+};
+struct vkd3d_memory_allocation
+{
+    struct { VkDeviceSize size, va; } resource;
+    VkDeviceSize offset, realignment_offset;
+    void *cpu_address;
+    struct vkd3d_memory_chunk *chunk;
 };
 union vkd3d_address_binding_report_resource_info
 {
@@ -324,16 +342,64 @@ static void run_candidates(void)
     }
 }
 
+static void run_placement(void)
+{
+    /* Sizes, alignments and expected offsets are in units of 64 KiB. */
+    static const struct
+    {
+        const char *name;
+        unsigned int count;
+        struct { unsigned int size, alignment, offset; } steps[6];
+    } tests[] = {
+        {"Alternating 1 MiB and 4 MiB heaps", 6,
+            {{16, 1, 0}, {64, 64, 64}, {16, 1, 16}, {64, 64, 128}, {16, 1, 32}, {64, 64, 192}}},
+        {"Exact fit takes priority over MSAA padding", 4,
+            {{16, 1, 0}, {64, 64, 64}, {96, 64, 128}, {32, 1, 224}}},
+        {"Ordinary alignment keeps the largest range", 3,
+            {{1, 1, 0}, {4, 4, 4}, {1, 1, 8}}},
+    };
+    const VkDeviceSize unit = 64 * 1024;
+    unsigned int t, i;
+
+    for (t = 0; t < sizeof(tests) / sizeof(*tests); t++)
+    {
+        struct vkd3d_memory_allocation allocations[6];
+        struct vkd3d_memory_chunk chunk = {0};
+        VkMemoryRequirements req;
+
+        current_case = tests[t].name;
+        chunk.allocation.resource.size = 256 * unit;
+        vkd3d_memory_chunk_insert_range(&chunk, 0, 0, chunk.allocation.resource.size);
+        for (i = 0; i < tests[t].count; i++)
+        {
+            req.size = tests[t].steps[i].size * unit;
+            req.alignment = tests[t].steps[i].alignment * unit;
+            CHECK(vkd3d_memory_chunk_allocate_range(&chunk, &req, &allocations[i]) == S_OK);
+            CHECK(allocations[i].offset == tests[t].steps[i].offset * unit);
+            CHECK(allocations[i].resource.size == req.size);
+        }
+        for (i = 0; i < tests[t].count; i++)
+            vkd3d_memory_chunk_free_range(&chunk, &allocations[i]);
+        CHECK(chunk.free_ranges_count == 1);
+        CHECK(chunk.free_ranges[0].offset == 0);
+        CHECK(chunk.free_ranges[0].length == chunk.allocation.resource.size);
+        free(chunk.free_ranges);
+        cases++;
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) return 2;
-    if (strcmp(argv[1], "all") && strcmp(argv[1], "locking") && strcmp(argv[1], "candidates"))
+    if (strcmp(argv[1], "all") && strcmp(argv[1], "locking")
+            && strcmp(argv[1], "candidates") && strcmp(argv[1], "placement"))
     {
         fprintf(stderr, "Unknown test group: %s\n", argv[1]);
         return 2;
     }
     if (!strcmp(argv[1], "all") || !strcmp(argv[1], "locking")) run_locking();
     if (!strcmp(argv[1], "all") || !strcmp(argv[1], "candidates")) run_candidates();
+    if (!strcmp(argv[1], "all") || !strcmp(argv[1], "placement")) run_placement();
     printf("Memory allocation: %u cases and %u checks passed (%s).\n", cases, checks, argv[1]);
     return 0;
 }
@@ -344,23 +410,36 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path,
                         default=Path(__file__).resolve().parents[1] / "libs/vkd3d/memory.c")
-    parser.add_argument("--revision", help="read memory.c from a Git revision for a negative control")
+    parser.add_argument("--revision", help="read the allocator sources from a Git revision for a negative control")
     parser.add_argument("--build-dir", type=Path)
     parser.add_argument("--generate", type=Path)
-    parser.add_argument("--group", choices=("all", "locking", "candidates"), default="all")
+    parser.add_argument("--group", choices=("all", "locking", "candidates", "placement"), default="all")
     parser.add_argument("--sanitize", action="store_true")
     args = parser.parse_args()
     if not args.generate and not args.build_dir:
         parser.error("either --generate or --build-dir is required")
     source_path = args.source.resolve()
-    if args.revision:
-        source = subprocess.check_output(["git", "show", args.revision + ":libs/vkd3d/memory.c"],
-                                         cwd=source_path.parents[2], text=True)
-    else:
-        source = source_path.read_text()
-    harness = PREAMBLE + "\n".join(extract_function(source, name) for name in (
+    root = Path(__file__).resolve().parents[1]
+
+    def read(path):
+        if args.revision:
+            return subprocess.check_output(["git", "show", f"{args.revision}:{path}"],
+                                           cwd=source_path.parents[2], text=True)
+        return (root / path).read_text()
+
+    source = read("libs/vkd3d/memory.c") if args.revision else source_path.read_text()
+    header = read("libs/vkd3d/vkd3d_private.h")
+    common = read("include/private/vkd3d_common.h")
+    parts = [PREAMBLE, extract_function(common, "align64"), extract_function(common, "align"),
+             extract_function(read("libs/vkd3d-common/memory.c"), "vkd3d_array_reserve"),
+             extract_function(header, "vkd3d_memory_allocation_slice"),
+             extract_struct(header, "vkd3d_memory_free_range"), extract_struct(header, "vkd3d_memory_chunk")]
+    parts.extend(extract_function(source, name) for name in (
+        "vkd3d_memory_chunk_insert_range", "vkd3d_memory_chunk_remove_range", "vkd3d_memory_chunk_allocate_range",
+        "vkd3d_memory_chunk_find_range", "vkd3d_memory_chunk_free_range",
         "vkd3d_memory_info_type_mask_covers_multiple_memory_heaps",
-        "vkd3d_try_allocate_device_memory", "vkd3d_allocate_device_memory")) + TESTS
+        "vkd3d_try_allocate_device_memory", "vkd3d_allocate_device_memory"))
+    harness = "\n\n".join([*parts, TESTS])
     if args.generate:
         args.generate.write_text(harness)
         return

@@ -1,5 +1,5 @@
 /*
- * Salkim modifications by Erhan Bilgili on 2026-11-03.
+ * Salkim modifications by Erhan Bilgili on 2026-11-03 and 2026-11-28.
  *
  * Copyright 2021 Philip Rebohle for Valve Corporation
  *
@@ -1760,6 +1760,9 @@ static HRESULT vkd3d_memory_chunk_allocate_range(struct vkd3d_memory_chunk *chun
         struct vkd3d_memory_allocation *allocation)
 {
     struct vkd3d_memory_free_range *pick_range;
+    bool prefer_padding = chunk->msaa_padding_seen
+            && memory_requirements->alignment < D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT;
+    bool picked_padding = false;
     VkDeviceSize l_length, r_length;
     size_t i, pick_index;
 
@@ -1772,6 +1775,7 @@ static HRESULT vkd3d_memory_chunk_allocate_range(struct vkd3d_memory_chunk *chun
     for (i = 0; i < chunk->free_ranges_count; i++)
     {
         struct vkd3d_memory_free_range *range = &chunk->free_ranges[i];
+        bool padding;
 
         if (range->offset + range->length < align(range->offset, memory_requirements->alignment) + memory_requirements->size)
             continue;
@@ -1784,12 +1788,15 @@ static HRESULT vkd3d_memory_chunk_allocate_range(struct vkd3d_memory_chunk *chun
             break;
         }
 
-        /* Alignment is almost always going to be 64 KiB, so
-         * don't worry too much about misalignment gaps here */
-        if (!pick_range || range->length > pick_range->length)
+        /* Use gaps with no MSAA-aligned start before splitting a range that has one. */
+        padding = prefer_padding && align64(range->offset, D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT)
+                >= range->offset + range->length;
+        if (!pick_range || (padding && !picked_padding)
+                || (padding == picked_padding && range->length > pick_range->length))
         {
             pick_index = i;
             pick_range = range;
+            picked_padding = padding;
         }
     }
 
@@ -1809,6 +1816,9 @@ static HRESULT vkd3d_memory_chunk_allocate_range(struct vkd3d_memory_chunk *chun
 
     if (l_length)
     {
+        if (memory_requirements->alignment == D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT)
+            chunk->msaa_padding_seen = true;
+
         pick_range->length = l_length;
 
         if (r_length)

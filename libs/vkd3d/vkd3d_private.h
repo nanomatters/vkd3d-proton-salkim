@@ -924,6 +924,7 @@ struct vkd3d_memory_chunk
     struct vkd3d_memory_free_range *free_ranges;
     size_t free_ranges_size;
     size_t free_ranges_count;
+    bool msaa_padding_seen;
 };
 
 #define VKD3D_MEMORY_TRANSFER_COMMAND_BUFFER_COUNT (16u)
